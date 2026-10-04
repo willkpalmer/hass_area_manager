@@ -1,0 +1,14 @@
+{
+  "domain": "area_manager",
+  "name": "WP Area Manager",
+  "codeowners": ["@willkpalmer"],
+  "config_flow": true,
+  "dependencies": ["frontend", "http", "panel_custom", "websocket_api"],
+  "documentation": "https://github.com/willkpalmer/hass_area_manager",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/willkpalmer/hass_area_manager/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

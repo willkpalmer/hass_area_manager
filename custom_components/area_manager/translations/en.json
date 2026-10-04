@@ -1,0 +1,14 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up WP Area Manager",
+        "description": "Adds an Area Manager page to the sidebar (admins only) for assigning devices to areas, one at a time or many at once, managing your areas, and seeing every device by area. There is nothing to configure."
+      }
+    },
+    "abort": {
+      "already_configured": "WP Area Manager is already configured.",
+      "single_instance_allowed": "WP Area Manager is already configured."
+    }
+  }
+}
