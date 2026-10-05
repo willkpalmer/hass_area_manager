@@ -10,8 +10,9 @@
 //   #by-area  Devices by area - the same devices grouped by area (devices
 //             without one first), with the same per-row and bulk controls,
 //             so devices can be moved between areas from here too.
-//   #areas    Areas - create, rename, change the icon or floor of, and
-//             delete areas.
+//   #areas    Areas - every area, grouped by floor (when there are any
+//             floors), to create, rename, change the icon or floor of,
+//             and delete.
 //
 // Everything comes from one WebSocket subscription (area_manager/subscribe)
 // that sends every device, area and floor straight away and again after
@@ -259,6 +260,7 @@ const TEMPLATE = `
     </div>
     <div class="toolbar">
       <input type="search" data-el="area-filter" placeholder="Filter by area or floor">
+      <button class="action secondary" data-action="toggle-floors" title="Collapse or expand every floor">Collapse all</button>
       <span class="spacer"></span>
       <button class="action danger secondary" data-action="ask-delete" disabled>Delete selected</button>
     </div>
@@ -346,7 +348,6 @@ const DEVICE_VIEWS = {
 
 const AREA_COLUMNS = {
   name: { label: "Area", cmp: (a, b) => cmp(a.name, b.name) },
-  floor: { label: "Floor", cls: "minor", cmp: null }, // set per panel
   devices: { label: "Devices", cls: "num minor", num: true, firstDir: -1, cmp: null },
   actions: { label: "", cls: "actions" },
 };
@@ -375,6 +376,8 @@ class AreaManagerPanel extends HTMLElement {
     }
     this._state.areas = {
       filter: "",
+      // Floors (by floor_id, "" for areas without one) whose areas are hidden.
+      collapsed: this._loadCollapsed("areas"),
       sort: { key: "name", dir: 1 },
       selected: new Set(),
       // The area being edited, and what's been typed so far (kept when a
@@ -498,7 +501,6 @@ class AreaManagerPanel extends HTMLElement {
       if (!a.area_id !== !b.area_id) return a.area_id ? 1 : -1;
       return cmp(this._areaName(a.area_id), this._areaName(b.area_id));
     };
-    AREA_COLUMNS.floor.cmp = (a, b) => cmp(this._floorName(a.floor_id), this._floorName(b.floor_id));
     AREA_COLUMNS.devices.cmp = (a, b) =>
       (this._areaDeviceCounts.get(a.area_id) || 0) - (this._areaDeviceCounts.get(b.area_id) || 0);
   }
@@ -553,12 +555,39 @@ class AreaManagerPanel extends HTMLElement {
   _saveCollapsed() {
     try {
       const saved = {};
-      for (const name of Object.keys(DEVICE_VIEWS)) {
+      for (const name of [...Object.keys(DEVICE_VIEWS), "areas"]) {
         const collapsed = this._state[name].collapsed;
         if (collapsed.size) saved[name] = [...collapsed];
       }
       localStorage.setItem(COLLAPSED_KEY, JSON.stringify(saved));
     } catch (_err) { /* storage unavailable: just not remembered */ }
+  }
+
+  // Collapsing a floor deselects its areas, so a delete only ever touches
+  // areas in view.
+  _setFloorCollapsed(floor, collapsed) {
+    const st = this._state.areas;
+    if (collapsed) {
+      st.collapsed.add(floor);
+      for (const a of this._data.areas) {
+        if (this._floorKey(a) === floor) st.selected.delete(a.area_id);
+      }
+    } else {
+      st.collapsed.delete(floor);
+    }
+    this._saveCollapsed();
+  }
+
+  // The floor an area is grouped under: "" for none (or a floor that's gone).
+  _floorKey(a) {
+    return a.floor_id && this._floors.has(a.floor_id) ? a.floor_id : NONE;
+  }
+
+  // The areas shown and selectable: filtered in, and not on a collapsed floor.
+  _shownAreas() {
+    const st = this._state.areas;
+    const grouped = this._data.floors.length > 0;
+    return this._visibleAreas().filter((a) => !grouped || !st.collapsed.has(this._floorKey(a)));
   }
 
   // Collapsing a group deselects its devices: nothing hidden is selected,
@@ -874,16 +903,20 @@ class AreaManagerPanel extends HTMLElement {
     floorSelect.value = this._floors?.has(keepFloor) ? keepFloor : "";
     floorSelect.hidden = !this._data.floors.length;
 
+    // Grouped by floor, in level order, areas without a floor last; a
+    // flat list when there are no floors at all.
+    const grouped = this._data.floors.length > 0;
     const rows = this._visibleAreas().sort(byColumn(AREA_COLUMNS[st.sort.key], st.sort.dir));
+    const shown = this._shownAreas();
 
-    const columns = ["name", ...(this._data.floors.length ? ["floor"] : []), "devices", "actions"];
+    const columns = ["name", "devices", "actions"];
     const head = this._el("area-head");
     head.textContent = "";
-    const selectedShown = rows.filter((a) => st.selected.has(a.area_id)).length;
+    const selectedShown = shown.filter((a) => st.selected.has(a.area_id)).length;
     const allCb = el("input", { type: "checkbox", dataset: { selectAllAreas: "1" }, title: "Select every area shown" });
-    allCb.checked = rows.length > 0 && selectedShown === rows.length;
-    allCb.indeterminate = selectedShown > 0 && selectedShown < rows.length;
-    allCb.disabled = !rows.length;
+    allCb.checked = shown.length > 0 && selectedShown === shown.length;
+    allCb.indeterminate = selectedShown > 0 && selectedShown < shown.length;
+    allCb.disabled = !shown.length;
     head.append(el("th", { class: "check" }, allCb));
     for (const key of columns) {
       const col = AREA_COLUMNS[key];
@@ -899,8 +932,33 @@ class AreaManagerPanel extends HTMLElement {
     const body = this._el("area-body");
     body.textContent = "";
     const frag = document.createDocumentFragment();
-    for (const a of rows) frag.append(st.editing === a.area_id ? this._areaEditRow(a, columns) : this._areaRow(a, columns));
+    const areaRow = (a) => (st.editing === a.area_id ? this._areaEditRow(a, columns) : this._areaRow(a, columns));
+    if (grouped) {
+      const byFloor = new Map();
+      for (const a of rows) {
+        const key = this._floorKey(a);
+        if (!byFloor.has(key)) byFloor.set(key, []);
+        byFloor.get(key).push(a);
+      }
+      const order = [...this._sortedFloors().map((f) => f.floor_id), NONE];
+      for (const key of order) {
+        const members = byFloor.get(key);
+        if (!members) continue;
+        const collapsed = st.collapsed.has(key);
+        frag.append(this._floorRow(key, members, collapsed, columns.length));
+        if (!collapsed) for (const a of members) frag.append(areaRow(a));
+      }
+    } else {
+      for (const a of rows) frag.append(areaRow(a));
+    }
     body.append(frag);
+
+    const toggle = this.shadowRoot.querySelector('[data-action="toggle-floors"]');
+    const floorKeys = new Set(rows.map((a) => this._floorKey(a)));
+    toggle.hidden = !grouped;
+    toggle.disabled = !floorKeys.size;
+    toggle.textContent = floorKeys.size && [...floorKeys].every((k) => st.collapsed.has(k))
+      ? "Expand all" : "Collapse all";
 
     const status = this._el("area-status");
     status.hidden = this._loaded && !this._error && rows.length > 0;
@@ -919,6 +977,35 @@ class AreaManagerPanel extends HTMLElement {
         if (st.focus === "name" && st.draft.name === undefined) input.select();
       }
     }
+  }
+
+  _floorRow(key, members, collapsed, colSpan) {
+    const st = this._state.areas;
+    const tr = el("tr", {
+      class: "group",
+      dataset: { floorToggle: key },
+      title: collapsed ? "Show this floor's areas" : "Hide this floor's areas",
+    });
+    const selected = members.filter((a) => st.selected.has(a.area_id)).length;
+    const cb = el("input", {
+      type: "checkbox",
+      dataset: { floorSelect: key },
+      title: collapsed ? "Expand to select these areas" : "Select all of this floor's areas",
+    });
+    cb.checked = selected > 0 && selected === members.length;
+    cb.indeterminate = selected > 0 && selected < members.length;
+    cb.disabled = collapsed;
+    tr.append(el("td", { class: "check" }, cb));
+    const td = el("td", { colSpan });
+    td.append(el("span", { class: "caret" }, collapsed ? "▸" : "▾"));
+    const floor = this._floors.get(key);
+    if (floor?.icon) td.append(el("ha-icon", { icon: floor.icon }));
+    td.append(floor ? floor.name : "No floor");
+    td.append(el("span", { class: "group-count" }, ` (${members.length})`));
+    const devices = members.reduce((sum, a) => sum + (this._areaDeviceCounts.get(a.area_id) || 0), 0);
+    td.append(el("span", { class: "group-count" }, ` · ${plural(devices, "device", "devices")}`));
+    tr.append(td);
+    return tr;
   }
 
   _areaRow(a, columns) {
@@ -941,11 +1028,6 @@ class AreaManagerPanel extends HTMLElement {
           td.append(name);
           break;
         }
-        case "floor":
-          if (a.floor_id && this._floors.has(a.floor_id)) {
-            td.append(el("span", { class: "label" }, "Floor: "), this._floorName(a.floor_id));
-          }
-          break;
         case "devices": {
           const n = this._areaDeviceCounts.get(a.area_id) || 0;
           td.append(el("button", {
@@ -984,16 +1066,15 @@ class AreaManagerPanel extends HTMLElement {
               placeholder: "Icon, e.g. mdi:sofa", style: "margin-top: 6px",
             }),
           );
+          if (this._data.floors.length) {
+            const select = el("select", { dataset: { edit: "floor" }, title: "Floor", style: "margin-top: 6px" });
+            select.append(el("option", { value: "" }, "No floor"));
+            for (const f of this._sortedFloors()) select.append(el("option", { value: f.floor_id }, f.name));
+            select.value = draft.floor ?? this._floorKey(a);
+            if (select.value !== (draft.floor ?? select.value)) select.value = "";
+            td.append(select);
+          }
           break;
-        case "floor": {
-          const select = el("select", { dataset: { edit: "floor" } });
-          select.append(el("option", { value: "" }, "No floor"));
-          for (const f of this._sortedFloors()) select.append(el("option", { value: f.floor_id }, f.name));
-          select.value = draft.floor ?? (a.floor_id && this._floors.has(a.floor_id) ? a.floor_id : "");
-          if (select.value !== (draft.floor ?? select.value)) select.value = "";
-          td.append(select);
-          break;
-        }
         case "devices":
           td.append(plural(this._areaDeviceCounts.get(a.area_id) || 0, "device", "devices"));
           break;
@@ -1167,6 +1248,20 @@ class AreaManagerPanel extends HTMLElement {
 
   async _onAreaClick(ev, find, action) {
     const st = this._state.areas;
+    const floorRow = find("floorToggle");
+    if (floorRow) {
+      const key = floorRow.dataset.floorToggle;
+      this._setFloorCollapsed(key, !st.collapsed.has(key));
+      this._render();
+      return;
+    }
+    if (action === "toggle-floors") {
+      const keys = new Set(this._visibleAreas().map((a) => this._floorKey(a)));
+      const allCollapsed = [...keys].every((k) => st.collapsed.has(k));
+      for (const k of keys) this._setFloorCollapsed(k, !allCollapsed);
+      this._render();
+      return;
+    }
     const sortTh = find("sortArea");
     if (sortTh) {
       const key = sortTh.dataset.sortArea;
@@ -1349,7 +1444,13 @@ class AreaManagerPanel extends HTMLElement {
       if (target.checked) st.selected.add(ds.areaRow);
       else st.selected.delete(ds.areaRow);
     } else if (ds.selectAllAreas !== undefined) {
+      for (const a of this._shownAreas()) {
+        if (target.checked) st.selected.add(a.area_id);
+        else st.selected.delete(a.area_id);
+      }
+    } else if (ds.floorSelect !== undefined) {
       for (const a of this._visibleAreas()) {
+        if (this._floorKey(a) !== ds.floorSelect) continue;
         if (target.checked) st.selected.add(a.area_id);
         else st.selected.delete(a.area_id);
       }

@@ -74,11 +74,19 @@ view, so you can move devices between areas from here too. Each area's
 
 ### Areas
 
+Every area, grouped by floor (in floor level order, areas without a floor
+last), with each floor's area and device counts. Click a floor's heading to
+collapse or expand it, or use **Collapse all** / **Expand all**; which ones
+are collapsed is remembered in your browser. Without any floors, the areas
+are one list.
+
 - **Create** an area: type its name (and optionally an icon such as
   `mdi:sofa` and its floor) and press **Create area** or Enter.
 - **Rename** an area, or change its icon or floor: press **Edit** on its
   row, make the changes, and press **Save** or Enter (Escape cancels).
-- **Delete** areas: tick them and press **Delete selected**, then confirm.
+- **Delete** areas: tick them (or a floor's heading to tick all of its
+  areas) and press **Delete selected**, then confirm. Collapsing a floor
+  unticks its areas.
   Their devices and entities are left without an area, as when deleting
   an area on Home Assistant's own pages. This can't be undone.
 - Each area's device count opens **Devices by area** at that area.
