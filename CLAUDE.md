@@ -20,3 +20,9 @@ When the user asks for a release: bump `"version"` once for everything
 since the last release (semantic versioning: patch for fixes only, minor
 if there are features), commit, merge the working branch into `main` and
 push, then confirm the release exists.
+
+There hasn't been a release yet (until there is, HACS shows the commit
+hash as the installed version), and there's no `main` branch yet either.
+The first release is `v0.2.0`: set `"version"` to `0.2.0` (whatever it is
+before), create `main` from the working branch and push it, which runs
+the release workflow.
