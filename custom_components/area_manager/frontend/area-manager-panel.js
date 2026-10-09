@@ -1,7 +1,7 @@
 // WP Area Manager - sidebar panel.
 //
 // A self-contained web component (no build step, no external libraries),
-// laid out like WP Log Doctor's panel, with three views:
+// laid out like WP Log Doctor's panel, with five views:
 //
 //   #devices  Devices - every device, grouped by integration. Each group
 //             collapses and expands, and each device's area can be changed
@@ -13,10 +13,20 @@
 //   #areas    Areas - every area, grouped by floor (when there are any
 //             floors), to create, rename, change the icon or floor of,
 //             and delete.
+//   #by-category  By category - automations, scripts and scenes (one tab
+//             each), grouped by category, with per-row and bulk category
+//             controls like the device views.
+//   #categories  Categories - the categories of automations, scripts and
+//             scenes (one tab each), to create, rename, change the icon
+//             of, and delete.
+//
+// The last two are drawn by a separate element, AreaManagerCategories (at
+// the end of this file), which the panel hands the data to.
 //
 // Everything comes from one WebSocket subscription (area_manager/subscribe)
-// that sends every device, area and floor straight away and again after
-// every change, wherever it was made, so the lists are always live.
+// that sends every device, area, floor, automation, script, scene and
+// category straight away and again after every change, wherever it was
+// made, so the lists are always live.
 //
 // The page itself doesn't scroll: the view buttons, toolbar and column
 // headings stay put and only the list scrolls (unless the window is too
@@ -28,7 +38,14 @@ const WS = {
   AREA_CREATE: "area_manager/area/create",
   AREA_UPDATE: "area_manager/area/update",
   AREA_DELETE: "area_manager/area/delete",
+  CATEGORIZE: "area_manager/categorize",
+  CATEGORY_CREATE: "area_manager/category/create",
+  CATEGORY_UPDATE: "area_manager/category/update",
+  CATEGORY_DELETE: "area_manager/category/delete",
 };
+
+// The views drawn by AreaManagerCategories.
+const CATEGORY_VIEWS = { "by-category": "items", categories: "manage" };
 
 // Where the collapsed groups of each view are remembered, per browser.
 const COLLAPSED_KEY = "area_manager.collapsed_groups";
@@ -62,6 +79,16 @@ const STYLE = `
   width: 100%; max-width: 1400px; margin: 0 auto; padding: 16px;
 }
 .views { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; flex: none; }
+area-manager-categories { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+area-manager-categories[hidden] { display: none; }
+.tabs { display: flex; border-bottom: 1px solid var(--divider-color, #e0e0e0); }
+.tab {
+  flex: 0 0 auto; padding: 12px 20px; background: none; border: 0;
+  border-bottom: 2px solid transparent; color: var(--secondary-text-color, #727272);
+  font: inherit; font-weight: 500; cursor: pointer;
+}
+.tab.active { color: var(--primary-color, #03a9f4); border-bottom-color: var(--primary-color, #03a9f4); }
+.tab .count { opacity: 0.8; font-weight: 400; }
 .view {
   font: inherit; font-weight: 500; padding: 8px 16px; border-radius: 18px; cursor: pointer;
   border: 1px solid var(--divider-color, #e0e0e0);
@@ -77,7 +104,7 @@ const STYLE = `
   flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column;
 }
 .card[hidden] { display: none; }
-.card > .toolbar, .card > .confirm, .card > .footer { flex: none; }
+.card > .tabs, .card > .toolbar, .card > .confirm, .card > .footer { flex: none; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 16px; }
 .toolbar + .toolbar { padding-top: 0; }
 .toolbar.create { border-bottom: 1px solid var(--divider-color, #e0e0e0); padding-bottom: 12px; }
@@ -199,6 +226,9 @@ a:hover { text-decoration: underline; }
   tbody tr.group .group-link { margin-left: 0; margin-right: 6px; }
   tbody tr.group .group-count { margin-right: 8px; }
   .label { display: inline; }
+  /* The tabs scroll sideways rather than run off the card. */
+  .tabs { overflow-x: auto; scrollbar-width: none; }
+  .tab { white-space: nowrap; padding: 12px 14px; }
 }
 
 /* Too short for a fixed top part (e.g. a phone held sideways): the whole
@@ -221,7 +251,10 @@ const TEMPLATE = `
     <button class="view" data-view="devices">Devices <span class="count" data-count="devices"></span></button>
     <button class="view" data-view="by-area">Devices by area <span class="count" data-count="unassigned"></span></button>
     <button class="view" data-view="areas">Areas <span class="count" data-count="areas"></span></button>
+    <button class="view" data-view="by-category">By category <span class="count" data-count="uncategorized"></span></button>
+    <button class="view" data-view="categories">Categories <span class="count" data-count="categories"></span></button>
   </div>
+  <area-manager-categories data-el="categories" hidden></area-manager-categories>
 
   <div class="card" data-el="devices-card">
     <div class="toolbar">
@@ -405,7 +438,11 @@ class AreaManagerPanel extends HTMLElement {
     this._el("new-name").addEventListener("input", () => this._syncCreate());
     // Which edit field has the cursor, to put it back after a redraw;
     // none once anything else is focused.
+    // The categories element handles its own events; it only asks the
+    // panel to switch view (e.g. from a category's count to its items).
+    this.shadowRoot.addEventListener("area-manager-view", (ev) => this._setView(ev.detail.view));
     this.shadowRoot.addEventListener("focusin", (ev) => {
+      if (this._fromCategories(ev)) return;
       this._state.areas.focus = ev.composedPath()[0].dataset?.edit || null;
     });
     this._el("area-body").addEventListener("input", (ev) => {
@@ -417,6 +454,7 @@ class AreaManagerPanel extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    this._el("categories").hass = hass;
     if (this.isConnected) this._subscribe();
   }
 
@@ -450,6 +488,10 @@ class AreaManagerPanel extends HTMLElement {
   _st(name = this._view) { return this._state[name]; }
 
   _isDeviceView(name = this._view) { return !!DEVICE_VIEWS[name]; }
+
+  _isCategoryView(name = this._view) { return !!CATEGORY_VIEWS[name]; }
+
+  _fromCategories(ev) { return ev.composedPath().includes(this._el("categories")); }
 
   // -- data -------------------------------------------------------------
 
@@ -610,7 +652,7 @@ class AreaManagerPanel extends HTMLElement {
 
   _applyHash(force = false) {
     const hash = window.location.hash.replace("#", "");
-    const view = (DEVICE_VIEWS[hash] || hash === "areas") ? hash : this._view;
+    const view = (DEVICE_VIEWS[hash] || CATEGORY_VIEWS[hash] || hash === "areas") ? hash : this._view;
     if (view !== this._view || force) {
       this._view = view;
       this._render();
@@ -635,13 +677,28 @@ class AreaManagerPanel extends HTMLElement {
     const unassigned = devices.filter((d) => !d.area_id).length;
     this._el("devices-card").hidden = !this._isDeviceView();
     this._el("areas-card").hidden = this._view !== "areas";
+    const categoriesEl = this._el("categories");
+    categoriesEl.hidden = !this._isCategoryView();
+    const items = this._data.categorizable || [];
+    const uncategorized = items.filter((i) => i.editable && !i.category_id).length;
+    const categoryCount = Object.values(this._data.categories || {}).reduce((sum, list) => sum + list.length, 0);
     const counts = this.shadowRoot.querySelectorAll("[data-count]");
     for (const span of counts) {
       if (!this._loaded) { span.textContent = ""; continue; }
-      const n = { devices: devices.length, unassigned, areas: this._data.areas.length }[span.dataset.count];
-      span.textContent = span.dataset.count === "unassigned"
-        ? (n ? `(${n} without)` : "")
-        : `(${n})`;
+      const key = span.dataset.count;
+      const n = {
+        devices: devices.length, unassigned, areas: this._data.areas.length,
+        uncategorized, categories: categoryCount,
+      }[key];
+      if (key === "unassigned") span.textContent = n ? `(${n} without)` : "";
+      else if (key === "uncategorized") span.textContent = n ? `(${n} uncategorized)` : "";
+      else span.textContent = `(${n})`;
+    }
+    if (this._isCategoryView()) {
+      categoriesEl.update({
+        mode: CATEGORY_VIEWS[this._view], data: this._data, loaded: this._loaded, error: this._error,
+      });
+      return;
     }
     if (this._isDeviceView()) this._renderDevices();
     else this._renderAreas();
@@ -1095,6 +1152,7 @@ class AreaManagerPanel extends HTMLElement {
 
   // Enables and labels the toolbar buttons to match the selection.
   _syncControls() {
+    if (this._isCategoryView()) return;
     if (this._isDeviceView()) {
       const ids = this._selectedDeviceIds();
       const n = ids.length;
@@ -1155,6 +1213,7 @@ class AreaManagerPanel extends HTMLElement {
   // -- events -----------------------------------------------------------
 
   async _onClick(ev) {
+    if (this._fromCategories(ev)) return;
     const path = ev.composedPath();
     const find = (key) => path.find((n) => n.dataset && n.dataset[key] !== undefined);
 
@@ -1395,6 +1454,7 @@ class AreaManagerPanel extends HTMLElement {
   }
 
   async _onChange(ev) {
+    if (this._fromCategories(ev)) return;
     const target = ev.composedPath()[0];
     const ds = target.dataset || {};
     if (target === this._el("device-kind")) {
@@ -1461,6 +1521,7 @@ class AreaManagerPanel extends HTMLElement {
   }
 
   async _onKey(ev) {
+    if (this._fromCategories(ev)) return;
     const target = ev.composedPath()[0];
     if (ev.key === "Enter" && (target === this._el("new-name") || target === this._el("new-icon"))) {
       ev.preventDefault();
@@ -1477,6 +1538,965 @@ class AreaManagerPanel extends HTMLElement {
       }
     }
   }
+}
+
+// -- the category views -------------------------------------------------
+//
+// AreaManagerCategories draws the "By category" (mode "items") and
+// "Categories" (mode "manage") views: a tab for each kind of thing with
+// categories (automations, scripts, scenes), then either their items
+// grouped by category, with per-row and bulk category controls like the
+// device views, or the categories themselves, to create, rename, change the
+// icon of and delete, like the Areas view. The panel hands it the snapshot
+// (update()); it makes its changes over the WebSocket itself.
+
+const CATEGORY_SCOPES = {
+  automation: { label: "Automations", one: "automation", many: "automations", page: "/config/automation/dashboard" },
+  script: { label: "Scripts", one: "script", many: "scripts", page: "/config/script/dashboard" },
+  scene: { label: "Scenes", one: "scene", many: "scenes", page: "/config/scene/dashboard" },
+};
+// The tab last picked, and the collapsed categories of each tab, per browser.
+const SCOPE_KEY = "area_manager.category_scope";
+const CATEGORY_COLLAPSED_KEY = "area_manager.collapsed_categories";
+
+const ITEM_COLUMNS = {
+  name: { label: "Name", cls: "name", cmp: (a, b) => cmp(a.name, b.name) },
+  entity: { label: "Entity ID", cls: "minor", cmp: (a, b) => cmp(a.entity_id, b.entity_id) },
+  category: { label: "Category", cls: "area", cmp: null }, // set per element: sorts by category name
+};
+
+const CATEGORY_COLUMNS = {
+  name: { label: "Category", cmp: (a, b) => cmp(a.name, b.name) },
+  items: { label: "Used by", cls: "num minor", num: true, firstDir: -1, cmp: null }, // set per element
+  actions: { label: "", cls: "actions" },
+};
+
+const CATEGORY_STYLE = `
+:host {
+  display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;
+  height: auto; background: transparent;
+}
+:host([hidden]) { display: none; }
+.mode { flex: none; }
+.mode[hidden] { display: none; }
+@media (max-height: 520px) {
+  :host { display: block; min-height: 0; }
+}
+`;
+
+const CATEGORY_TEMPLATE = `
+<div class="card">
+  <div class="tabs" data-el="tabs"></div>
+  <div class="mode" data-mode="items">
+    <div class="toolbar">
+      <input type="search" data-el="item-filter">
+      <select data-el="item-kind" title="Show">
+        <option value="">All</option>
+        <option value="none">Uncategorized</option>
+        <option value="assigned">With a category</option>
+      </select>
+      <button class="action secondary" data-action="toggle-groups" title="Collapse or expand every category">Collapse all</button>
+    </div>
+    <div class="toolbar">
+      <span class="selection" data-el="selection"></span>
+      <span class="spacer"></span>
+      <select data-el="bulk-category" title="Category for the selected items"></select>
+      <button class="action" data-action="assign" disabled>Set category</button>
+      <button class="action secondary" data-action="unassign" disabled>Remove category</button>
+    </div>
+  </div>
+  <div class="mode" data-mode="manage">
+    <div class="toolbar create">
+      <input type="text" data-el="new-name" placeholder="New category name" maxlength="255">
+      <input type="text" class="icon-input" data-el="new-icon" placeholder="Icon, e.g. mdi:lightbulb">
+      <button class="action" data-action="create" disabled>Create category</button>
+    </div>
+    <div class="toolbar">
+      <input type="search" data-el="category-filter" placeholder="Filter by category">
+      <span class="spacer"></span>
+      <button class="action danger secondary" data-action="ask-delete" disabled>Delete selected</button>
+    </div>
+    <div class="confirm" data-el="confirm">
+      <span data-el="confirm-text"></span>
+      <button class="action secondary" data-action="cancel-delete">Cancel</button>
+      <button class="action danger" data-action="delete">Delete permanently</button>
+    </div>
+  </div>
+  <div class="table-wrap" data-el="scroll">
+    <table>
+      <thead><tr data-el="head"></tr></thead>
+      <tbody data-el="body"></tbody>
+    </table>
+    <div class="status" data-el="status">Loading…</div>
+  </div>
+  <div class="footer" data-el="footer"></div>
+</div>
+`;
+
+class AreaManagerCategories extends HTMLElement {
+  constructor() {
+    super();
+    this._hass = null;
+    this._mode = "items";
+    this._data = { categories: {}, categorizable: [] };
+    this._loaded = false;
+    this._error = null;
+    this._busy = false;
+    let scope = null;
+    try { scope = localStorage.getItem(SCOPE_KEY); } catch (_err) { /* not remembered */ }
+    this._scope = CATEGORY_SCOPES[scope] ? scope : "automation";
+    const collapsed = this._loadCollapsed();
+    this._state = {};
+    for (const name of Object.keys(CATEGORY_SCOPES)) {
+      this._state[name] = {
+        items: {
+          filter: "",
+          kind: "",
+          sort: { key: "name", dir: 1 },
+          selected: new Set(),
+          collapsed: new Set(collapsed[name] || []),
+        },
+        manage: {
+          filter: "",
+          sort: { key: "name", dir: 1 },
+          selected: new Set(),
+          // As on the Areas view: the category being edited, what's been
+          // typed so far and which field has the cursor, kept across redraws.
+          editing: null,
+          draft: {},
+          focus: null,
+          confirming: false,
+        },
+      };
+    }
+    this._index();
+    this.attachShadow({ mode: "open" });
+    this.shadowRoot.innerHTML = `<style>${STYLE}${CATEGORY_STYLE}</style>${CATEGORY_TEMPLATE}`;
+    this._el = (name) => this.shadowRoot.querySelector(`[data-el="${name}"]`);
+    this.shadowRoot.addEventListener("click", (ev) => this._onClick(ev));
+    this.shadowRoot.addEventListener("change", (ev) => this._onChange(ev));
+    this.shadowRoot.addEventListener("keydown", (ev) => this._onKey(ev));
+    this.shadowRoot.addEventListener("focusin", (ev) => {
+      this._ms().focus = ev.composedPath()[0].dataset?.edit || null;
+    });
+    this._el("body").addEventListener("input", (ev) => {
+      const target = ev.composedPath()[0];
+      if (target.dataset?.edit) this._ms().draft[target.dataset.edit] = target.value;
+    });
+    this._el("item-filter").addEventListener("input", (ev) => {
+      this._is().filter = ev.target.value;
+      this._render();
+    });
+    this._el("category-filter").addEventListener("input", (ev) => {
+      this._ms().filter = ev.target.value;
+      this._render();
+    });
+    this._el("new-name").addEventListener("input", () => this._syncControls());
+  }
+
+  set hass(hass) { this._hass = hass; }
+
+  get hass() { return this._hass; }
+
+  // Called by the panel whenever its data or the view changes.
+  update({ mode, data, loaded, error }) {
+    if (mode !== this._mode) {
+      // Nothing half-done carries over from the other view.
+      this._ms().confirming = false;
+      this._mode = mode;
+    }
+    this._data = { categories: data.categories || {}, categorizable: data.categorizable || [] };
+    this._loaded = loaded;
+    this._error = error;
+    this._index();
+    // Forget selections of what's gone.
+    for (const scope of Object.keys(CATEGORY_SCOPES)) {
+      const ids = new Set(this._items(scope).filter((i) => i.editable).map((i) => i.entity_id));
+      const cats = this._categories.get(scope);
+      const st = this._state[scope];
+      for (const id of [...st.items.selected]) if (!ids.has(id)) st.items.selected.delete(id);
+      for (const id of [...st.manage.selected]) if (!cats.has(id)) st.manage.selected.delete(id);
+      if (st.manage.editing && !cats.has(st.manage.editing)) st.manage.editing = null;
+    }
+    this._render();
+  }
+
+  // -- data -------------------------------------------------------------
+
+  _index() {
+    this._categories = new Map();
+    this._counts = new Map();
+    for (const scope of Object.keys(CATEGORY_SCOPES)) {
+      const list = this._data.categories[scope] || [];
+      this._categories.set(scope, new Map(list.map((c) => [c.category_id, c])));
+      const counts = new Map();
+      for (const i of this._items(scope)) {
+        if (i.category_id) counts.set(i.category_id, (counts.get(i.category_id) || 0) + 1);
+      }
+      this._counts.set(scope, counts);
+    }
+    ITEM_COLUMNS.category.cmp = (a, b) => {
+      // Uncategorized first.
+      const ka = this._categoryKey(a);
+      const kb = this._categoryKey(b);
+      if (!ka !== !kb) return ka ? 1 : -1;
+      return cmp(this._categoryName(ka), this._categoryName(kb));
+    };
+    CATEGORY_COLUMNS.items.cmp = (a, b) =>
+      (this._counts.get(this._scope).get(a.category_id) || 0) - (this._counts.get(this._scope).get(b.category_id) || 0);
+  }
+
+  _items(scope = this._scope) {
+    return this._data.categorizable.filter((i) => i.scope === scope);
+  }
+
+  _s(scope = this._scope) { return this._state[scope]; }
+
+  _is() { return this._s().items; }
+
+  _ms() { return this._s().manage; }
+
+  _info() { return CATEGORY_SCOPES[this._scope]; }
+
+  // An item's category, or "" for none (or one that's gone).
+  _categoryKey(i) {
+    return i.category_id && this._categories.get(this._scope).has(i.category_id) ? i.category_id : NONE;
+  }
+
+  _categoryName(id) { return this._categories.get(this._scope).get(id)?.name || ""; }
+
+  _sortedCategories() {
+    return [...this._categories.get(this._scope).values()].sort((a, b) => cmp(a.name, b.name));
+  }
+
+  async _call(msg, success) {
+    if (!this._hass) return null;
+    this._busy = true;
+    this._syncControls();
+    try {
+      const res = await this._hass.callWS(msg);
+      if (success) this._toast(typeof success === "function" ? success(res) : success);
+      return res || {};
+    } catch (err) {
+      this._toast(`Failed: ${err.message || err.code || err}`);
+      return null;
+    } finally {
+      this._busy = false;
+      this._syncControls();
+    }
+  }
+
+  _toast(message) {
+    this.dispatchEvent(new CustomEvent("hass-notification", {
+      detail: { message }, bubbles: true, composed: true,
+    }));
+  }
+
+  _loadCollapsed() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CATEGORY_COLLAPSED_KEY) || "{}");
+      return saved && typeof saved === "object" ? saved : {};
+    } catch (_err) {
+      return {};
+    }
+  }
+
+  _saveCollapsed() {
+    try {
+      const saved = {};
+      for (const scope of Object.keys(CATEGORY_SCOPES)) {
+        const collapsed = this._state[scope].items.collapsed;
+        if (collapsed.size) saved[scope] = [...collapsed];
+      }
+      localStorage.setItem(CATEGORY_COLLAPSED_KEY, JSON.stringify(saved));
+    } catch (_err) { /* storage unavailable: just not remembered */ }
+  }
+
+  // Collapsing a category deselects what's in it, so a bulk change only
+  // ever touches items in view.
+  _setCollapsed(key, collapsed) {
+    const st = this._is();
+    if (collapsed) {
+      st.collapsed.add(key);
+      for (const i of this._items()) if (this._categoryKey(i) === key) st.selected.delete(i.entity_id);
+    } else {
+      st.collapsed.delete(key);
+    }
+    this._saveCollapsed();
+  }
+
+  _setScope(scope) {
+    if (scope === this._scope || !CATEGORY_SCOPES[scope]) return;
+    this._ms().confirming = false;
+    this._scope = scope;
+    try { localStorage.setItem(SCOPE_KEY, scope); } catch (_err) { /* not remembered */ }
+    this._index();
+    this._render();
+  }
+
+  // -- rendering --------------------------------------------------------
+
+  _render() {
+    const tabs = this._el("tabs");
+    tabs.textContent = "";
+    for (const [scope, info] of Object.entries(CATEGORY_SCOPES)) {
+      const n = this._mode === "items"
+        ? this._items(scope).length
+        : (this._data.categories[scope] || []).length;
+      const tab = el("button", {
+        class: `tab ${scope === this._scope ? "active" : ""}`, dataset: { scope },
+        title: this._mode === "items" ? `${info.label}, by category` : `${info.label}' categories`,
+      }, info.label, " ", el("span", { class: "count" }, this._loaded ? `(${n})` : ""));
+      tabs.append(tab);
+    }
+    for (const div of this.shadowRoot.querySelectorAll("[data-mode]")) {
+      div.hidden = div.dataset.mode !== this._mode;
+    }
+    if (this._mode === "items") this._renderItems();
+    else this._renderManage();
+    this._syncControls();
+  }
+
+  _visibleItems() {
+    const st = this._is();
+    const wanted = words(st.filter);
+    return this._items().filter((i) => {
+      if (st.kind === "none" && this._categoryKey(i)) return false;
+      if (st.kind === "assigned" && !this._categoryKey(i)) return false;
+      if (!wanted.length) return true;
+      const text = `${i.name} ${i.entity_id} ${this._categoryName(this._categoryKey(i))}`.toLowerCase();
+      return wanted.every((w) => text.includes(w));
+    });
+  }
+
+  _renderItems() {
+    const st = this._is();
+    const info = this._info();
+    const filter = this._el("item-filter");
+    filter.value = st.filter;
+    filter.placeholder = `Filter by ${info.one} name, entity ID or category`;
+    this._el("item-kind").value = st.kind;
+    this._el("item-kind").options[0].textContent = `All ${info.many}`;
+
+    const rows = this._visibleItems();
+    const shown = rows.filter((i) => !st.collapsed.has(this._categoryKey(i)) && i.editable);
+    const head = this._el("head");
+    head.textContent = "";
+    const selectedShown = shown.filter((i) => st.selected.has(i.entity_id)).length;
+    const allCb = el("input", { type: "checkbox", dataset: { selectAll: "1" }, title: `Select every ${info.one} shown` });
+    allCb.checked = shown.length > 0 && selectedShown === shown.length;
+    allCb.indeterminate = selectedShown > 0 && selectedShown < shown.length;
+    allCb.disabled = !shown.length;
+    head.append(el("th", { class: "check" }, allCb));
+    const columns = ["name", "entity", "category"];
+    for (const key of columns) {
+      const col = ITEM_COLUMNS[key];
+      const th = el("th", { class: "sortable", dataset: { sort: key } }, col.label);
+      th.append(el("span", { class: "arrow" }, st.sort.key === key ? (st.sort.dir > 0 ? "▲" : "▼") : ""));
+      head.append(th);
+    }
+
+    // Uncategorized first, then the categories A-Z.
+    const groups = new Map();
+    for (const i of rows) {
+      const key = this._categoryKey(i);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(i);
+    }
+    const order = [...groups.keys()].sort((a, b) => {
+      if (!a !== !b) return a ? 1 : -1;
+      return cmp(this._categoryName(a), this._categoryName(b));
+    });
+    const body = this._el("body");
+    body.textContent = "";
+    const frag = document.createDocumentFragment();
+    const sortCol = ITEM_COLUMNS[st.sort.key];
+    for (const key of order) {
+      const members = groups.get(key).sort(byColumn(sortCol, st.sort.dir));
+      const collapsed = st.collapsed.has(key);
+      frag.append(this._groupRow(key, members, collapsed, columns.length));
+      if (!collapsed) for (const i of members) frag.append(this._itemRow(i, columns));
+    }
+    body.append(frag);
+
+    const total = this._items().length;
+    const status = this._el("status");
+    status.hidden = this._loaded && !this._error && rows.length > 0;
+    status.textContent = this._error || (!this._loaded ? "Loading…"
+      : total ? `No ${info.many} match.` : `No ${info.many} yet.`);
+
+    const toggle = this.shadowRoot.querySelector('[data-action="toggle-groups"]');
+    toggle.disabled = !groups.size;
+    toggle.textContent = groups.size && [...groups.keys()].every((k) => st.collapsed.has(k))
+      ? "Expand all" : "Collapse all";
+
+    const fixed = this._items().filter((i) => !i.editable).length;
+    this._el("footer").textContent = this._loaded
+      ? `Showing ${plural(rows.length, info.one, info.many)} of ${total}.`
+        + (fixed ? ` ${plural(fixed, `${info.one} has`, `${info.many} have`)} no unique ID, so Home Assistant can't give ${fixed === 1 ? "it" : "them"} a category.` : "")
+      : "";
+  }
+
+  _groupRow(key, members, collapsed, colSpan) {
+    const st = this._is();
+    const info = this._info();
+    const tr = el("tr", {
+      class: "group",
+      dataset: { groupToggle: key },
+      title: collapsed ? `Show these ${info.many}` : `Hide these ${info.many}`,
+    });
+    const selectable = members.filter((i) => i.editable);
+    const selected = selectable.filter((i) => st.selected.has(i.entity_id)).length;
+    const cb = el("input", {
+      type: "checkbox",
+      dataset: { groupSelect: key },
+      title: collapsed ? `Expand to select these ${info.many}` : `Select all of these ${info.many}`,
+    });
+    cb.checked = selected > 0 && selected === selectable.length;
+    cb.indeterminate = selected > 0 && selected < selectable.length;
+    cb.disabled = collapsed || !selectable.length;
+    tr.append(el("td", { class: "check" }, cb));
+    const td = el("td", { colSpan });
+    td.append(el("span", { class: "caret" }, collapsed ? "▸" : "▾"));
+    const category = key ? this._categories.get(this._scope).get(key) : null;
+    if (category?.icon) td.append(el("ha-icon", { icon: category.icon }));
+    td.append(category ? category.name : "Uncategorized");
+    td.append(el("span", { class: "group-count" }, ` (${members.length})`));
+    tr.append(td);
+    return tr;
+  }
+
+  _itemRow(i, columns) {
+    const st = this._is();
+    const tr = el("tr", { class: "row", dataset: { id: i.entity_id } });
+    if (st.selected.has(i.entity_id)) tr.classList.add("selected");
+    if (i.disabled) tr.classList.add("disabled");
+    const cb = el("input", { type: "checkbox", dataset: { row: i.entity_id } });
+    cb.checked = st.selected.has(i.entity_id);
+    cb.disabled = !i.editable;
+    tr.append(el("td", { class: "check" }, cb));
+    for (const key of columns) {
+      const td = el("td", { class: ITEM_COLUMNS[key].cls || "" });
+      switch (key) {
+        case "name":
+          td.append(el("a", {
+            href: "#", dataset: { moreInfo: i.entity_id }, title: "Open its details in Home Assistant",
+          }, i.name));
+          if (i.disabled) td.append(el("span", { class: "chip disabled" }, "Disabled"));
+          if (!i.editable) {
+            const chip = el("span", { class: "chip disabled" }, "No unique ID");
+            chip.title = "Not in Home Assistant's entity registry, so it can't have a category";
+            td.append(chip);
+          }
+          break;
+        case "entity":
+          td.append(el("span", { class: "label" }, "Entity ID: "), i.entity_id);
+          break;
+        case "category": {
+          const select = el("select", { dataset: { assign: i.entity_id }, title: "Its category" });
+          this._categoryOptions(select, this._categoryKey(i));
+          select.disabled = this._busy || !i.editable;
+          td.append(select);
+          break;
+        }
+        default:
+          break;
+      }
+      tr.append(td);
+    }
+    return tr;
+  }
+
+  _categoryOptions(select, current, placeholder = null) {
+    select.textContent = "";
+    if (placeholder) select.append(el("option", { value: "__pick__", disabled: true }, placeholder));
+    select.append(el("option", { value: "" }, "No category"));
+    for (const c of this._sortedCategories()) select.append(el("option", { value: c.category_id }, c.name));
+    const fallback = placeholder ? "__pick__" : "";
+    select.value = current ?? fallback;
+    if (select.value !== (current ?? fallback)) select.value = fallback;
+  }
+
+  _visibleCategories() {
+    const wanted = words(this._ms().filter);
+    return this._sortedCategories().filter((c) => {
+      if (!wanted.length) return true;
+      return wanted.every((w) => c.name.toLowerCase().includes(w));
+    });
+  }
+
+  _renderManage() {
+    const st = this._ms();
+    const info = this._info();
+    this._el("category-filter").value = st.filter;
+    this._el("new-name").placeholder = `New ${info.one} category name`;
+
+    const rows = this._visibleCategories().sort(byColumn(CATEGORY_COLUMNS[st.sort.key], st.sort.dir));
+    const columns = ["name", "items", "actions"];
+    const head = this._el("head");
+    head.textContent = "";
+    const selectedShown = rows.filter((c) => st.selected.has(c.category_id)).length;
+    const allCb = el("input", { type: "checkbox", dataset: { selectAllCategories: "1" }, title: "Select every category shown" });
+    allCb.checked = rows.length > 0 && selectedShown === rows.length;
+    allCb.indeterminate = selectedShown > 0 && selectedShown < rows.length;
+    allCb.disabled = !rows.length;
+    head.append(el("th", { class: "check" }, allCb));
+    for (const key of columns) {
+      const col = CATEGORY_COLUMNS[key];
+      if (!col.cmp) {
+        head.append(el("th", {}, col.label));
+        continue;
+      }
+      const th = el("th", { class: `sortable ${col.num ? "num" : ""}`, dataset: { sort: key } }, col.label);
+      th.append(el("span", { class: "arrow" }, st.sort.key === key ? (st.sort.dir > 0 ? "▲" : "▼") : ""));
+      head.append(th);
+    }
+
+    const body = this._el("body");
+    body.textContent = "";
+    const frag = document.createDocumentFragment();
+    for (const c of rows) {
+      frag.append(st.editing === c.category_id ? this._editRow(c, columns) : this._categoryRow(c, columns));
+    }
+    body.append(frag);
+
+    const total = this._categories.get(this._scope).size;
+    const status = this._el("status");
+    status.hidden = this._loaded && !this._error && rows.length > 0;
+    status.textContent = this._error || (!this._loaded ? "Loading…"
+      : total ? "No categories match." : `No ${info.one} categories yet. Create one above.`);
+
+    const items = this._items().filter((i) => i.editable);
+    const categorized = items.filter((i) => this._categoryKey(i)).length;
+    this._el("footer").textContent = this._loaded
+      ? `${plural(total, "category", "categories")} for ${info.many}; ${plural(categorized, info.one, info.many)} in one, ${plural(items.length - categorized, info.one, info.many)} uncategorized.`
+      : "";
+    if (st.editing && st.focus) {
+      const input = body.querySelector(`[data-edit="${st.focus}"]`);
+      if (input) {
+        input.focus();
+        if (st.focus === "name" && st.draft.name === undefined) input.select();
+      }
+    }
+  }
+
+  _categoryRow(c, columns) {
+    const st = this._ms();
+    const info = this._info();
+    const tr = el("tr", { class: "row", dataset: { categoryId: c.category_id } });
+    if (st.selected.has(c.category_id)) tr.classList.add("selected");
+    const cb = el("input", { type: "checkbox", dataset: { categoryRow: c.category_id } });
+    cb.checked = st.selected.has(c.category_id);
+    tr.append(el("td", { class: "check" }, cb));
+    for (const key of columns) {
+      const td = el("td", { class: CATEGORY_COLUMNS[key].cls || "" });
+      switch (key) {
+        case "name": {
+          const name = el("span", { class: "area-name" });
+          if (c.icon) name.append(el("ha-icon", { icon: c.icon }));
+          name.append(c.name);
+          td.append(name);
+          break;
+        }
+        case "items": {
+          const n = this._counts.get(this._scope).get(c.category_id) || 0;
+          td.append(el("button", {
+            class: "linkish", dataset: { showCategory: c.category_id }, title: `Show this category's ${info.many}`,
+          }, plural(n, info.one, info.many)));
+          break;
+        }
+        case "actions":
+          td.append(el("button", {
+            class: "action secondary small", dataset: { editCategory: c.category_id },
+            title: "Rename, or change the icon",
+          }, "Edit"));
+          break;
+        default:
+          break;
+      }
+      tr.append(td);
+    }
+    return tr;
+  }
+
+  _editRow(c, columns) {
+    const draft = this._ms().draft;
+    const info = this._info();
+    const tr = el("tr", { class: "row editing", dataset: { categoryId: c.category_id } });
+    tr.append(el("td", { class: "check" }));
+    for (const key of columns) {
+      const td = el("td", { class: `edit ${CATEGORY_COLUMNS[key].cls || ""}` });
+      switch (key) {
+        case "name":
+          td.append(
+            el("input", {
+              type: "text", value: draft.name ?? c.name, dataset: { edit: "name" }, maxlength: "255", placeholder: "Name",
+            }),
+            el("input", {
+              type: "text", value: draft.icon ?? (c.icon || ""), dataset: { edit: "icon" },
+              placeholder: "Icon, e.g. mdi:lightbulb", style: "margin-top: 6px",
+            }),
+          );
+          break;
+        case "items":
+          td.append(plural(this._counts.get(this._scope).get(c.category_id) || 0, info.one, info.many));
+          break;
+        case "actions":
+          td.append(
+            el("button", { class: "action small", dataset: { saveCategory: c.category_id } }, "Save"),
+            " ",
+            el("button", { class: "action secondary small", dataset: { cancelEdit: "1" } }, "Cancel"),
+          );
+          break;
+        default:
+          break;
+      }
+      tr.append(td);
+    }
+    return tr;
+  }
+
+  // The selected items still in view (filtered in, not collapsed).
+  _selectedItemIds() {
+    const st = this._is();
+    if (!st.selected.size) return [];
+    return this._visibleItems()
+      .filter((i) => i.editable && st.selected.has(i.entity_id) && !st.collapsed.has(this._categoryKey(i)))
+      .map((i) => i.entity_id);
+  }
+
+  _syncControls() {
+    const info = this._info();
+    if (this._mode === "items") {
+      const ids = this._selectedItemIds();
+      const n = ids.length;
+      this._el("selection").textContent = n
+        ? `${plural(n, info.one, info.many)} selected`
+        : `No ${info.many} selected`;
+      const bulk = this._el("bulk-category");
+      const keep = bulk.value;
+      this._categoryOptions(
+        bulk,
+        keep && keep !== "__pick__" && this._categories.get(this._scope).has(keep) ? keep : null,
+        "Move to category…",
+      );
+      const assign = this.shadowRoot.querySelector('[data-action="assign"]');
+      assign.disabled = this._busy || !n || bulk.value === "__pick__";
+      assign.textContent = n ? `Set category of ${plural(n, info.one, info.many)}` : "Set category";
+      const unassign = this.shadowRoot.querySelector('[data-action="unassign"]');
+      const withCategory = new Set(this._items().filter((i) => this._categoryKey(i)).map((i) => i.entity_id));
+      unassign.disabled = this._busy || !ids.some((id) => withCategory.has(id));
+      unassign.title = `Leave the selected ${info.many} without a category`;
+      for (const select of this.shadowRoot.querySelectorAll("select[data-assign]")) {
+        const item = this._data.categorizable.find((i) => i.entity_id === select.dataset.assign);
+        select.disabled = this._busy || !item?.editable;
+      }
+    } else {
+      const st = this._ms();
+      this.shadowRoot.querySelector('[data-action="create"]').disabled =
+        this._busy || !this._el("new-name").value.trim();
+      const del = this.shadowRoot.querySelector('[data-action="ask-delete"]');
+      del.disabled = this._busy || !st.selected.size;
+      del.textContent = st.selected.size ? `Delete ${plural(st.selected.size, "category", "categories")}` : "Delete selected";
+      if (!st.selected.size) st.confirming = false;
+      this._el("confirm").classList.toggle("open", st.confirming);
+      if (st.confirming) {
+        const ids = [...st.selected];
+        const names = ids.map((id) => this._categoryName(id)).sort(cmp);
+        const used = ids.reduce((sum, id) => sum + (this._counts.get(this._scope).get(id) || 0), 0);
+        const shown = names.length > 5 ? `${names.slice(0, 5).join(", ")} and ${names.length - 5} more` : names.join(", ");
+        this._el("confirm-text").textContent =
+          `Delete ${plural(ids.length, "category", "categories")} (${shown})?`
+          + (used ? ` ${plural(used, info.one, info.many)} in ${ids.length === 1 ? "it" : "them"} will be left uncategorized.` : "")
+          + " This can't be undone.";
+      }
+      this.shadowRoot.querySelector('[data-action="delete"]').disabled = this._busy;
+    }
+  }
+
+  // -- events -----------------------------------------------------------
+
+  async _onClick(ev) {
+    const path = ev.composedPath();
+    const find = (key) => path.find((n) => n.dataset && n.dataset[key] !== undefined);
+
+    const moreInfo = find("moreInfo");
+    if (moreInfo) {
+      ev.preventDefault();
+      // Home Assistant's own dialog for it.
+      this.dispatchEvent(new CustomEvent("hass-more-info", {
+        detail: { entityId: moreInfo.dataset.moreInfo }, bubbles: true, composed: true,
+      }));
+      return;
+    }
+    const tab = find("scope");
+    if (tab) {
+      this._setScope(tab.dataset.scope);
+      return;
+    }
+    if (path[0]?.type === "checkbox" || path[0]?.tagName === "SELECT") return;
+    const action = find("action")?.dataset.action;
+    if (this._mode === "items") await this._onItemsClick(find, action);
+    else await this._onManageClick(find, action);
+  }
+
+  async _onItemsClick(find, action) {
+    const st = this._is();
+    const group = find("groupToggle");
+    if (group) {
+      const key = group.dataset.groupToggle;
+      this._setCollapsed(key, !st.collapsed.has(key));
+      this._render();
+      return;
+    }
+    const sortTh = find("sort");
+    if (sortTh) {
+      const key = sortTh.dataset.sort;
+      if (st.sort.key === key) st.sort.dir = -st.sort.dir;
+      else st.sort = { key, dir: ITEM_COLUMNS[key].firstDir || 1 };
+      this._render();
+      return;
+    }
+    switch (action) {
+      case "toggle-groups": {
+        const keys = new Set(this._visibleItems().map((i) => this._categoryKey(i)));
+        const allCollapsed = [...keys].every((k) => st.collapsed.has(k));
+        for (const k of keys) this._setCollapsed(k, !allCollapsed);
+        this._render();
+        break;
+      }
+      case "assign": {
+        const categoryId = this._el("bulk-category").value;
+        if (categoryId === "__pick__") return;
+        await this._assign(this._selectedItemIds(), categoryId || null, true);
+        break;
+      }
+      case "unassign":
+        await this._assign(this._selectedItemIds(), null, true);
+        break;
+      default:
+        break;
+    }
+  }
+
+  async _assign(ids, categoryId, clearSelection) {
+    if (!ids.length) return;
+    const info = this._info();
+    const scope = this._scope;
+    const where = categoryId ? this._categoryName(categoryId) : null;
+    const res = await this._call(
+      { type: WS.CATEGORIZE, scope, entity_ids: ids, category_id: categoryId },
+      (r) => {
+        const n = r?.updated ?? ids.length;
+        if (!n) return where ? `Already in ${where}` : "Already uncategorized";
+        return where
+          ? `Moved ${plural(n, info.one, info.many)} to ${where}`
+          : `Removed the category of ${plural(n, info.one, info.many)}`;
+      },
+    );
+    if (res && clearSelection) {
+      this._s(scope).items.selected.clear();
+      this._render();
+    }
+  }
+
+  async _onManageClick(find, action) {
+    const st = this._ms();
+    const sortTh = find("sort");
+    if (sortTh) {
+      const key = sortTh.dataset.sort;
+      if (st.sort.key === key) st.sort.dir = -st.sort.dir;
+      else st.sort = { key, dir: CATEGORY_COLUMNS[key].firstDir || 1 };
+      this._render();
+      return;
+    }
+    const show = find("showCategory");
+    if (show) {
+      this._showCategoryItems(show.dataset.showCategory);
+      return;
+    }
+    const edit = find("editCategory");
+    if (edit) {
+      st.editing = edit.dataset.editCategory;
+      st.draft = {};
+      st.focus = "name";
+      this._render();
+      return;
+    }
+    if (find("cancelEdit")) {
+      this._stopEdit();
+      return;
+    }
+    const save = find("saveCategory");
+    if (save) {
+      await this._saveCategory(save.dataset.saveCategory);
+      return;
+    }
+    switch (action) {
+      case "create":
+        await this._createCategory();
+        break;
+      case "ask-delete":
+        st.confirming = true;
+        this._syncControls();
+        break;
+      case "cancel-delete":
+        st.confirming = false;
+        this._syncControls();
+        break;
+      case "delete": {
+        const ids = [...st.selected];
+        const res = await this._call(
+          { type: WS.CATEGORY_DELETE, scope: this._scope, category_ids: ids },
+          (r) => `Deleted ${plural(r?.deleted ?? ids.length, "category", "categories")}`,
+        );
+        if (res) {
+          st.selected.clear();
+          st.confirming = false;
+          this._render();
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  _stopEdit() {
+    const st = this._ms();
+    st.editing = null;
+    st.draft = {};
+    st.focus = null;
+    this._render();
+  }
+
+  // Opens By category at this category, expanded and not filtered out.
+  _showCategoryItems(categoryId) {
+    const st = this._is();
+    st.filter = "";
+    st.kind = "";
+    st.collapsed.delete(categoryId);
+    this._saveCollapsed();
+    this.dispatchEvent(new CustomEvent("area-manager-view", {
+      detail: { view: "by-category" }, bubbles: true, composed: true,
+    }));
+    requestAnimationFrame(() => {
+      const row = [...this.shadowRoot.querySelectorAll("tr.group")]
+        .find((tr) => tr.dataset.groupToggle === categoryId);
+      if (row) row.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  }
+
+  async _createCategory() {
+    const nameInput = this._el("new-name");
+    const name = nameInput.value.trim();
+    if (!name) return;
+    const icon = this._el("new-icon").value.trim();
+    const res = await this._call(
+      { type: WS.CATEGORY_CREATE, scope: this._scope, name, icon: icon || null },
+      `Created ${name}`,
+    );
+    if (res) {
+      nameInput.value = "";
+      this._el("new-icon").value = "";
+      this._syncControls();
+      nameInput.focus();
+    }
+  }
+
+  async _saveCategory(categoryId) {
+    const category = this._categories.get(this._scope).get(categoryId);
+    const row = this.shadowRoot.querySelector(`tr.editing[data-category-id="${CSS.escape(categoryId)}"]`);
+    if (!category || !row) return;
+    const name = row.querySelector('[data-edit="name"]').value.trim();
+    if (!name) {
+      this._toast("A category needs a name");
+      return;
+    }
+    const msg = { type: WS.CATEGORY_UPDATE, scope: this._scope, category_id: categoryId };
+    if (name !== category.name) msg.name = name;
+    const icon = row.querySelector('[data-edit="icon"]').value.trim() || null;
+    if (icon !== (category.icon || null)) msg.icon = icon;
+    if (Object.keys(msg).length > 3) {
+      const res = await this._call(msg, msg.name ? `Renamed ${category.name} to ${name}` : `Saved ${name}`);
+      if (!res) return;
+    }
+    this._stopEdit();
+  }
+
+  async _onChange(ev) {
+    const target = ev.composedPath()[0];
+    const ds = target.dataset || {};
+    if (target === this._el("item-kind")) {
+      this._is().kind = target.value;
+      this._render();
+      return;
+    }
+    if (target === this._el("bulk-category")) {
+      this._syncControls();
+      return;
+    }
+    if (ds.assign !== undefined) {
+      // One item, straight from its row.
+      await this._assign([ds.assign], target.value || null, false);
+      return;
+    }
+    if (this._mode === "items") {
+      const st = this._is();
+      const toggle = (i) => {
+        if (!i.editable) return;
+        if (target.checked) st.selected.add(i.entity_id);
+        else st.selected.delete(i.entity_id);
+      };
+      if (ds.row !== undefined) {
+        if (target.checked) st.selected.add(ds.row);
+        else st.selected.delete(ds.row);
+      } else if (ds.groupSelect !== undefined) {
+        for (const i of this._visibleItems()) if (this._categoryKey(i) === ds.groupSelect) toggle(i);
+      } else if (ds.selectAll !== undefined) {
+        for (const i of this._visibleItems()) if (!st.collapsed.has(this._categoryKey(i))) toggle(i);
+      } else {
+        return;
+      }
+      this._render();
+      return;
+    }
+    const st = this._ms();
+    if (ds.categoryRow !== undefined) {
+      if (target.checked) st.selected.add(ds.categoryRow);
+      else st.selected.delete(ds.categoryRow);
+    } else if (ds.selectAllCategories !== undefined) {
+      for (const c of this._visibleCategories()) {
+        if (target.checked) st.selected.add(c.category_id);
+        else st.selected.delete(c.category_id);
+      }
+    } else {
+      return;
+    }
+    this._render();
+  }
+
+  async _onKey(ev) {
+    const target = ev.composedPath()[0];
+    if (ev.key === "Enter" && (target === this._el("new-name") || target === this._el("new-icon"))) {
+      ev.preventDefault();
+      await this._createCategory();
+      return;
+    }
+    const editing = this._ms().editing;
+    if (editing && target.dataset?.edit !== undefined) {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        await this._saveCategory(editing);
+      } else if (ev.key === "Escape") {
+        this._stopEdit();
+      }
+    }
+  }
+}
+
+if (!customElements.get("area-manager-categories")) {
+  customElements.define("area-manager-categories", AreaManagerCategories);
 }
 
 if (!customElements.get("area-manager-panel")) {

@@ -2,7 +2,8 @@
 
 A Home Assistant custom integration that adds an **Area Manager** page to
 the sidebar for putting your devices in the right areas quickly - one at a
-time or dozens at once - and for managing the areas themselves.
+time or dozens at once - and for managing the areas themselves. It does
+the same for the categories of your automations, scripts and scenes.
 
 Home Assistant's own pages make you open each device to change its area.
 Area Manager lists every device on one page instead, grouped by
@@ -10,8 +11,8 @@ integration, with an area picker on every row and bulk controls for the
 devices you select.
 
 It changes nothing on its own: every change is one you make on the page,
-and it goes through Home Assistant's own device and area registries,
-exactly as if you'd made it on the Settings pages.
+and it goes through Home Assistant's own device, area, entity and
+category registries, exactly as if you'd made it on the Settings pages.
 
 ## Installation
 
@@ -36,8 +37,8 @@ step 4 above.
 
 ## The Area Manager page
 
-The page has three views, picked with the buttons at the top (or the
-URL's `#devices`, `#by-area` and `#areas`). Everything on it updates live:
+The page has five views, picked with the buttons at the top (or the
+URL's `#devices`, `#by-area`, `#areas`, `#by-category` and `#categories`). Everything on it updates live:
 changes made anywhere - on this page, in another browser tab, or on Home
 Assistant's own pages - show up straight away.
 
@@ -95,6 +96,40 @@ Floors are shown and can be picked when your Home Assistant has any; they
 are created and managed on Home Assistant's own **Areas, labels & zones**
 page.
 
+### By category
+
+Your automations, scripts and scenes, each on its own tab, grouped by
+category: uncategorized ones first, then each category. It works like
+**Devices by area**:
+
+- **Change one item's category** with the category picker on its row.
+- **Change many at once**: tick them (or a category's heading, or the box
+  in the column headings), choose a category under **Move to
+  category…** and press **Set category**. **Remove category** leaves the
+  selected ones uncategorized.
+- **Collapse or expand** categories, **filter** by name, entity ID or
+  category, show only the **uncategorized** ones or only those **with a
+  category**, and **sort** by any column.
+- Each item's name opens its Home Assistant details dialog.
+
+As in Home Assistant, each kind has its own categories: an automation can
+only go in an automation category, and so on. Automations, scripts and
+scenes without a unique ID (for example ones written in YAML without an
+`id`) are listed but can't have a category, as on Home Assistant's own
+pages.
+
+### Categories
+
+The categories of your automations, scripts and scenes, one tab each,
+managed like areas on the **Areas** view: **create** one (with an optional
+icon), **Edit** it to rename it or change its icon, and **delete**
+selected ones after confirming. Whatever was in a deleted category is left
+uncategorized. Each category's count opens **By category** at that
+category.
+
+Blueprints aren't included: Home Assistant doesn't support categories for
+blueprints.
+
 ## Requirements
 
 Home Assistant 2024.4 or newer.
@@ -108,11 +143,15 @@ build step. It talks to Home Assistant through the WebSocket commands in
 
 | Command | What it does |
 | --- | --- |
-| `area_manager/subscribe` | Sends every device, area and floor, then again after every change |
+| `area_manager/subscribe` | Sends every device, area, floor, automation, script, scene and category, then again after every change |
 | `area_manager/assign` | Sets (or with `area_id: null`, clears) the area of one or more devices |
 | `area_manager/area/create` | Creates an area (name, optional icon and floor) |
 | `area_manager/area/update` | Renames an area, or changes its icon or floor |
 | `area_manager/area/delete` | Deletes one or more areas |
+| `area_manager/categorize` | Sets (or with `category_id: null`, clears) the category of one or more automations, scripts or scenes |
+| `area_manager/category/create` | Creates an automation, script or scene category (name, optional icon) |
+| `area_manager/category/update` | Renames a category, or changes its icon |
+| `area_manager/category/delete` | Deletes one or more categories |
 
 All of them are admin-only. To run the tests:
 
