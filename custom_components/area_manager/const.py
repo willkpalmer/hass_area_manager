@@ -7,9 +7,10 @@ TITLE = "WP Area Manager"
 DATA_PANEL_STATIC_REGISTERED = f"{DOMAIN}_panel_static_registered"
 
 # The Area Manager sidebar panel (see panel.py / frontend/), with
-# "Devices", "Devices by area", "Areas", "By category" and "Categories"
-# views, picked by the URL's #devices / #by-area / #areas / #by-category /
-# #categories.
+# "Devices", "Devices by area", "Areas", "By category", "Categories",
+# "Zigbee by group" and "Zigbee groups" views, picked by the URL's
+# #devices / #by-area / #areas / #by-category / #categories / #zigbee /
+# #zigbee-groups.
 PANEL_URL_PATH = "area-manager"
 PANEL_TITLE = "Area Manager"
 PANEL_ICON = "mdi:floor-plan"

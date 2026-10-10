@@ -3,7 +3,8 @@
 A Home Assistant custom integration that adds an **Area Manager** page to
 the sidebar for putting your devices in the right areas quickly - one at a
 time or dozens at once - and for managing the areas themselves. It does
-the same for the categories of your automations, scripts and scenes.
+the same for the categories of your automations, scripts and scenes, and
+for your ZHA Zigbee groups.
 
 Home Assistant's own pages make you open each device to change its area.
 Area Manager lists every device on one page instead, grouped by
@@ -37,8 +38,10 @@ step 4 above.
 
 ## The Area Manager page
 
-The page has five views, picked with the buttons at the top (or the
-URL's `#devices`, `#by-area`, `#areas`, `#by-category` and `#categories`). Everything on it updates live:
+The page has up to seven views, picked with the buttons at the top (or
+the URL's `#devices`, `#by-area`, `#areas`, `#by-category`, `#categories`,
+`#zigbee` and `#zigbee-groups`). The two Zigbee views only appear when ZHA
+is set up. Everything on it updates live:
 changes made anywhere - on this page, in another browser tab, or on Home
 Assistant's own pages - show up straight away.
 
@@ -130,6 +133,41 @@ category.
 Blueprints aren't included: Home Assistant doesn't support categories for
 blueprints.
 
+### Zigbee by group
+
+For ZHA (Zigbee Home Automation) users: every Zigbee device that can be in
+a group, listed under each group it's in, with the devices in no group
+first. Unlike areas, a device can be in several groups at once, so it's
+listed once under each of them. Devices with more than one groupable
+endpoint (such as a twin socket) are listed once per endpoint.
+
+- **Add one device to a group** with the **Add to group…** picker on its
+  row (it only offers groups the device isn't in yet), and **Remove** it
+  from the group it's listed under with the button beside it.
+- **Change many at once**: tick devices (or a group's heading, or the box
+  in the column headings), then choose a group under **Add to group…** and
+  press **Add to group**, or press **Remove from group** to take each
+  ticked device out of the group it's listed under.
+- **Collapse or expand** groups, **filter** by device, manufacturer, model,
+  area or group, show only devices **not in a group** or **in a group**,
+  and **sort** by any column.
+- Each group's **Group ↗** link opens it on ZHA's own page.
+
+ZHA doesn't announce group changes, so the list is fetched again when you
+open the view, after every change you make here, and when anything else
+on the page changes; **Refresh** fetches it straight away.
+
+### Zigbee groups
+
+ZHA's groups, with their group IDs and member counts: **create** a group
+by name, and **delete** selected groups after confirming (their devices
+are taken out of them and their group entities removed). ZHA has no way
+to rename a group. Each group's count opens **Zigbee by group** at that
+group.
+
+All Zigbee changes go through ZHA's own commands, the same ones its Groups
+page uses, so they're exactly what ZHA would do.
+
 ## Requirements
 
 Home Assistant 2024.4 or newer.
@@ -152,6 +190,11 @@ build step. It talks to Home Assistant through the WebSocket commands in
 | `area_manager/category/create` | Creates an automation, script or scene category (name, optional icon) |
 | `area_manager/category/update` | Renames a category, or changes its icon |
 | `area_manager/category/delete` | Deletes one or more categories |
+
+The Zigbee views use ZHA's own commands (`zha/groups`,
+`zha/devices/groupable`, `zha/group/add`, `zha/group/remove`,
+`zha/group/members/add` and `zha/group/members/remove`) straight from the
+panel.
 
 All of them are admin-only. To run the tests:
 

@@ -148,6 +148,9 @@ async def async_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         "floors": floors,
         "categories": categories,
         "categorizable": _categorizable(hass, ent_reg),
+        # The Zigbee views work through ZHA's own commands, so they're only
+        # offered when ZHA is set up.
+        "zha": "zha" in hass.config.components,
     }
 
 

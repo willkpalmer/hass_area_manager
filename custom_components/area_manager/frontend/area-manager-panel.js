@@ -1,7 +1,7 @@
 // WP Area Manager - sidebar panel.
 //
 // A self-contained web component (no build step, no external libraries),
-// laid out like WP Log Doctor's panel, with five views:
+// laid out like WP Log Doctor's panel, with seven views:
 //
 //   #devices  Devices - every device, grouped by integration. Each group
 //             collapses and expands, and each device's area can be changed
@@ -20,8 +20,14 @@
 //             scenes (one tab each), to create, rename, change the icon
 //             of, and delete.
 //
-// The last two are drawn by a separate element, AreaManagerCategories (at
-// the end of this file), which the panel hands the data to.
+//   #zigbee   Zigbee by group - ZHA's groupable devices, listed under each
+//             Zigbee group they're in (or "Not in a group"), to add to and
+//             remove from groups, one at a time or in bulk.
+//   #zigbee-groups  Zigbee groups - ZHA's groups, to create and delete.
+//
+// The category views are drawn by a separate element, AreaManagerCategories,
+// and the Zigbee ones by AreaManagerZigbee (both near the end of this
+// file), which the panel hands the data to.
 //
 // Everything comes from one WebSocket subscription (area_manager/subscribe)
 // that sends every device, area, floor, automation, script, scene and
@@ -46,6 +52,8 @@ const WS = {
 
 // The views drawn by AreaManagerCategories.
 const CATEGORY_VIEWS = { "by-category": "items", categories: "manage" };
+// The views drawn by AreaManagerZigbee (only offered when ZHA is set up).
+const ZIGBEE_VIEWS = { zigbee: "members", "zigbee-groups": "groups" };
 
 // Where the collapsed groups of each view are remembered, per browser.
 const COLLAPSED_KEY = "area_manager.collapsed_groups";
@@ -79,8 +87,8 @@ const STYLE = `
   width: 100%; max-width: 1400px; margin: 0 auto; padding: 16px;
 }
 .views { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; flex: none; }
-area-manager-categories { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-area-manager-categories[hidden] { display: none; }
+area-manager-categories, area-manager-zigbee { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+area-manager-categories[hidden], area-manager-zigbee[hidden], .view[hidden] { display: none; }
 .tabs { display: flex; border-bottom: 1px solid var(--divider-color, #e0e0e0); }
 .tab {
   flex: 0 0 auto; padding: 12px 20px; background: none; border: 0;
@@ -253,8 +261,11 @@ const TEMPLATE = `
     <button class="view" data-view="areas">Areas <span class="count" data-count="areas"></span></button>
     <button class="view" data-view="by-category">By category <span class="count" data-count="uncategorized"></span></button>
     <button class="view" data-view="categories">Categories <span class="count" data-count="categories"></span></button>
+    <button class="view" data-view="zigbee" data-zha hidden>Zigbee by group</button>
+    <button class="view" data-view="zigbee-groups" data-zha hidden>Zigbee groups</button>
   </div>
   <area-manager-categories data-el="categories" hidden></area-manager-categories>
+  <area-manager-zigbee data-el="zigbee" hidden></area-manager-zigbee>
 
   <div class="card" data-el="devices-card">
     <div class="toolbar">
@@ -455,6 +466,7 @@ class AreaManagerPanel extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._el("categories").hass = hass;
+    this._el("zigbee").hass = hass;
     if (this.isConnected) this._subscribe();
   }
 
@@ -491,7 +503,13 @@ class AreaManagerPanel extends HTMLElement {
 
   _isCategoryView(name = this._view) { return !!CATEGORY_VIEWS[name]; }
 
-  _fromCategories(ev) { return ev.composedPath().includes(this._el("categories")); }
+  _isZigbeeView(name = this._view) { return !!ZIGBEE_VIEWS[name]; }
+
+  // Events from the category and Zigbee elements are theirs to handle.
+  _fromCategories(ev) {
+    const path = ev.composedPath();
+    return path.includes(this._el("categories")) || path.includes(this._el("zigbee"));
+  }
 
   // -- data -------------------------------------------------------------
 
@@ -652,7 +670,7 @@ class AreaManagerPanel extends HTMLElement {
 
   _applyHash(force = false) {
     const hash = window.location.hash.replace("#", "");
-    const view = (DEVICE_VIEWS[hash] || CATEGORY_VIEWS[hash] || hash === "areas") ? hash : this._view;
+    const view = (DEVICE_VIEWS[hash] || CATEGORY_VIEWS[hash] || ZIGBEE_VIEWS[hash] || hash === "areas") ? hash : this._view;
     if (view !== this._view || force) {
       this._view = view;
       this._render();
@@ -679,6 +697,13 @@ class AreaManagerPanel extends HTMLElement {
     this._el("areas-card").hidden = this._view !== "areas";
     const categoriesEl = this._el("categories");
     categoriesEl.hidden = !this._isCategoryView();
+    const zigbeeEl = this._el("zigbee");
+    zigbeeEl.hidden = !this._isZigbeeView();
+    // The Zigbee views only when ZHA is set up (or while one is open, so a
+    // link to it still works before the data arrives).
+    for (const btn of this.shadowRoot.querySelectorAll(".view[data-zha]")) {
+      btn.hidden = !this._data.zha && btn.dataset.view !== this._view;
+    }
     const items = this._data.categorizable || [];
     const uncategorized = items.filter((i) => i.editable && !i.category_id).length;
     const categoryCount = Object.values(this._data.categories || {}).reduce((sum, list) => sum + list.length, 0);
@@ -693,6 +718,10 @@ class AreaManagerPanel extends HTMLElement {
       if (key === "unassigned") span.textContent = n ? `(${n} without)` : "";
       else if (key === "uncategorized") span.textContent = n ? `(${n} uncategorized)` : "";
       else span.textContent = `(${n})`;
+    }
+    if (this._isZigbeeView()) {
+      zigbeeEl.update({ mode: ZIGBEE_VIEWS[this._view], data: this._data });
+      return;
     }
     if (this._isCategoryView()) {
       categoriesEl.update({
@@ -1152,7 +1181,7 @@ class AreaManagerPanel extends HTMLElement {
 
   // Enables and labels the toolbar buttons to match the selection.
   _syncControls() {
-    if (this._isCategoryView()) return;
+    if (this._isCategoryView() || this._isZigbeeView()) return;
     if (this._isDeviceView()) {
       const ids = this._selectedDeviceIds();
       const n = ids.length;
@@ -2497,6 +2526,854 @@ class AreaManagerCategories extends HTMLElement {
 
 if (!customElements.get("area-manager-categories")) {
   customElements.define("area-manager-categories", AreaManagerCategories);
+}
+
+// -- the Zigbee group views ---------------------------------------------
+//
+// AreaManagerZigbee draws the "Zigbee by group" (mode "members") and
+// "Zigbee groups" (mode "groups") views for ZHA. Unlike areas, a device can
+// be in any number of Zigbee groups (strictly, each of its groupable
+// endpoints can), so on "Zigbee by group" a device is listed under every
+// group it's in, plus "Not in a group" for those in none; rows can be added
+// to a group or removed from the group they're listed under, one at a time
+// or in bulk. "Zigbee groups" creates and deletes the groups themselves
+// (ZHA has no way to rename one).
+//
+// Everything goes through ZHA's own WebSocket commands, the ones its Groups
+// page uses. ZHA doesn't announce group changes, so the lists are fetched
+// when the view opens, after every change made here, and when anything
+// else on the page changes (which includes ZHA adding or removing group
+// entities).
+
+const ZHA_WS = {
+  GROUPS: "zha/groups",
+  GROUPABLE: "zha/devices/groupable",
+  GROUP_ADD: "zha/group/add",
+  GROUP_REMOVE: "zha/group/remove",
+  MEMBERS_ADD: "zha/group/members/add",
+  MEMBERS_REMOVE: "zha/group/members/remove",
+};
+// Fetched again on the panel's live updates at most this often (ms).
+const ZIGBEE_REFRESH_MS = 5000;
+const ZIGBEE_COLLAPSED_KEY = "area_manager.collapsed_zigbee_groups";
+
+const MEMBER_COLUMNS = {
+  name: { label: "Device", cls: "name", cmp: (a, b) => cmp(a.name, b.name) },
+  manufacturer: { label: "Manufacturer", cls: "minor", cmp: (a, b) => cmp(a.manufacturer, b.manufacturer) },
+  model: { label: "Model", cls: "minor", cmp: (a, b) => cmp(a.model, b.model) },
+  area: { label: "Area", cls: "minor", cmp: (a, b) => cmp(a.area, b.area) },
+  actions: { label: "", cls: "area" },
+};
+
+const ZGROUP_COLUMNS = {
+  name: { label: "Group", cmp: (a, b) => cmp(a.name, b.name) },
+  id: { label: "Group ID", cls: "minor", cmp: (a, b) => a.group_id - b.group_id },
+  members: { label: "Members", cls: "num minor", num: true, firstDir: -1, cmp: (a, b) => a.members.length - b.members.length },
+  actions: { label: "", cls: "actions" },
+};
+
+const ZIGBEE_TEMPLATE = `
+<div class="card">
+  <div class="mode" data-mode="members">
+    <div class="toolbar">
+      <input type="search" data-el="member-filter" placeholder="Filter by device, manufacturer, model, area or group">
+      <select data-el="member-kind" title="Show">
+        <option value="">All groupable devices</option>
+        <option value="none">Not in a group</option>
+        <option value="grouped">In a group</option>
+      </select>
+      <button class="action secondary" data-action="toggle-groups" title="Collapse or expand every group">Collapse all</button>
+      <button class="action secondary" data-action="refresh" title="Fetch the groups from ZHA again">Refresh</button>
+    </div>
+    <div class="toolbar">
+      <span class="selection" data-el="selection"></span>
+      <span class="spacer"></span>
+      <select data-el="bulk-group" title="Group to add the selected devices to"></select>
+      <button class="action" data-action="add" disabled>Add to group</button>
+      <button class="action secondary" data-action="remove" disabled
+        title="Take each selected device out of the group it's listed under">Remove from group</button>
+    </div>
+  </div>
+  <div class="mode" data-mode="groups">
+    <div class="toolbar create">
+      <input type="text" data-el="new-name" placeholder="New Zigbee group name" maxlength="255">
+      <button class="action" data-action="create" disabled>Create group</button>
+    </div>
+    <div class="toolbar">
+      <input type="search" data-el="group-filter" placeholder="Filter by group name or ID">
+      <button class="action secondary" data-action="refresh" title="Fetch the groups from ZHA again">Refresh</button>
+      <span class="spacer"></span>
+      <button class="action danger secondary" data-action="ask-delete" disabled>Delete selected</button>
+    </div>
+    <div class="confirm" data-el="confirm">
+      <span data-el="confirm-text"></span>
+      <button class="action secondary" data-action="cancel-delete">Cancel</button>
+      <button class="action danger" data-action="delete">Delete permanently</button>
+    </div>
+  </div>
+  <div class="table-wrap" data-el="scroll">
+    <table>
+      <thead><tr data-el="head"></tr></thead>
+      <tbody data-el="body"></tbody>
+    </table>
+    <div class="status" data-el="status">Loading…</div>
+  </div>
+  <div class="footer" data-el="footer"></div>
+</div>
+`;
+
+const ZIGBEE_STYLE = `
+.row-actions { display: flex; align-items: center; gap: 6px; }
+.row-actions select { flex: 1 1 auto; min-width: 130px; max-width: 220px; padding: 5px 8px; }
+.chip.group-id { text-transform: none; }
+`;
+
+function hexGroupId(id) {
+  return `0x${Number(id).toString(16).padStart(4, "0")}`;
+}
+
+class AreaManagerZigbee extends HTMLElement {
+  constructor() {
+    super();
+    this._hass = null;
+    this._mode = "members";
+    this._groups = [];
+    this._groupable = [];
+    this._areas = new Map();
+    this._loaded = false;
+    this._error = null;
+    this._busy = false;
+    this._fetching = null;
+    this._fetchedAt = 0;
+    let collapsed = [];
+    try { collapsed = JSON.parse(localStorage.getItem(ZIGBEE_COLLAPSED_KEY) || "[]"); } catch (_err) { /* none */ }
+    this._state = {
+      members: {
+        filter: "",
+        kind: "",
+        sort: { key: "name", dir: 1 },
+        selected: new Set(),
+        collapsed: new Set(Array.isArray(collapsed) ? collapsed.map(String) : []),
+      },
+      groups: { filter: "", sort: { key: "name", dir: 1 }, selected: new Set(), confirming: false },
+    };
+    this.attachShadow({ mode: "open" });
+    this.shadowRoot.innerHTML = `<style>${STYLE}${CATEGORY_STYLE}${ZIGBEE_STYLE}</style>${ZIGBEE_TEMPLATE}`;
+    this._el = (name) => this.shadowRoot.querySelector(`[data-el="${name}"]`);
+    this.shadowRoot.addEventListener("click", (ev) => this._onClick(ev));
+    this.shadowRoot.addEventListener("change", (ev) => this._onChange(ev));
+    this._el("member-filter").addEventListener("input", (ev) => {
+      this._state.members.filter = ev.target.value;
+      this._render();
+    });
+    this._el("group-filter").addEventListener("input", (ev) => {
+      this._state.groups.filter = ev.target.value;
+      this._render();
+    });
+    this._el("new-name").addEventListener("input", () => this._syncControls());
+    this._el("new-name").addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        this._createGroup();
+      }
+    });
+  }
+
+  set hass(hass) { this._hass = hass; }
+
+  get hass() { return this._hass; }
+
+  // Called by the panel when this view is shown and on its live updates.
+  update({ mode, data }) {
+    if (mode !== this._mode) {
+      this._state.groups.confirming = false;
+      this._mode = mode;
+    }
+    this._areas = new Map((data.areas || []).map((a) => [a.area_id, a.name]));
+    this._render();
+    if (!this._loaded || Date.now() - this._fetchedAt > ZIGBEE_REFRESH_MS) this._fetch();
+  }
+
+  // -- data -------------------------------------------------------------
+
+  async _fetch() {
+    if (!this._hass) return;
+    if (this._fetching) return this._fetching;
+    this._fetching = (async () => {
+      try {
+        const [groups, groupable] = await Promise.all([
+          this._hass.callWS({ type: ZHA_WS.GROUPS }),
+          this._hass.callWS({ type: ZHA_WS.GROUPABLE }),
+        ]);
+        this._groups = groups || [];
+        this._groupable = groupable || [];
+        this._error = null;
+      } catch (err) {
+        this._error = err?.code === "unknown_command"
+          ? "ZHA isn't set up in this Home Assistant."
+          : `Couldn't load the Zigbee groups from ZHA: ${err?.message || err?.code || err}`;
+      } finally {
+        this._loaded = true;
+        this._fetchedAt = Date.now();
+        this._fetching = null;
+      }
+      this._prune();
+      this._render();
+    })();
+    return this._fetching;
+  }
+
+  // Forget selections of what's gone.
+  _prune() {
+    const rowKeys = new Set(this._rows().map((r) => r.key));
+    for (const key of [...this._state.members.selected]) if (!rowKeys.has(key)) this._state.members.selected.delete(key);
+    const ids = new Set(this._groups.map((g) => String(g.group_id)));
+    for (const id of [...this._state.groups.selected]) if (!ids.has(id)) this._state.groups.selected.delete(id);
+  }
+
+  _endpointKey(ieee, endpointId) { return `${ieee}/${endpointId}`; }
+
+  _describe(device, endpointId, multi) {
+    const name = device.user_given_name || device.name || device.ieee;
+    return {
+      ieee: device.ieee,
+      endpoint_id: endpointId,
+      name: multi ? `${name} (endpoint ${endpointId})` : name,
+      device_id: device.device_reg_id,
+      manufacturer: device.manufacturer || "",
+      model: device.model || "",
+      area: this._areas.get(device.area_id) || "",
+    };
+  }
+
+  // One row per group member, plus one per groupable endpoint in no group.
+  // Row keys are "<group id>|<ieee>/<endpoint>", with "" as the group id
+  // for "Not in a group".
+  _rows() {
+    const endpointsPerDevice = new Map();
+    for (const g of this._groupable) {
+      endpointsPerDevice.set(g.device.ieee, (endpointsPerDevice.get(g.device.ieee) || 0) + 1);
+    }
+    const multi = (ieee) => (endpointsPerDevice.get(ieee) || 0) > 1;
+    const rows = [];
+    const grouped = new Set();
+    for (const group of this._groups) {
+      for (const m of group.members || []) {
+        const ep = this._endpointKey(m.device.ieee, m.endpoint_id);
+        grouped.add(ep);
+        rows.push({
+          ...this._describe(m.device, m.endpoint_id, multi(m.device.ieee)),
+          key: `${group.group_id}|${ep}`, group: String(group.group_id), endpoint: ep,
+        });
+      }
+    }
+    for (const g of this._groupable) {
+      const ep = this._endpointKey(g.device.ieee, g.endpoint_id);
+      if (grouped.has(ep)) continue;
+      rows.push({ ...this._describe(g.device, g.endpoint_id, multi(g.device.ieee)), key: `|${ep}`, group: NONE, endpoint: ep });
+    }
+    return rows;
+  }
+
+  _groupName(id) {
+    const group = this._groups.find((g) => String(g.group_id) === id);
+    return group ? group.name || hexGroupId(group.group_id) : "";
+  }
+
+  _membersOf(id) {
+    const group = this._groups.find((g) => String(g.group_id) === id);
+    return new Set((group?.members || []).map((m) => this._endpointKey(m.device.ieee, m.endpoint_id)));
+  }
+
+  async _call(msg, success) {
+    if (!this._hass) return null;
+    this._busy = true;
+    this._syncControls();
+    try {
+      const res = await this._hass.callWS(msg);
+      if (success) this._toast(success);
+      return res || {};
+    } catch (err) {
+      this._toast(`Failed: ${err?.message || err?.code || err}`);
+      return null;
+    } finally {
+      this._busy = false;
+      this._syncControls();
+    }
+  }
+
+  _toast(message) {
+    this.dispatchEvent(new CustomEvent("hass-notification", {
+      detail: { message }, bubbles: true, composed: true,
+    }));
+  }
+
+  _saveCollapsed() {
+    try {
+      localStorage.setItem(ZIGBEE_COLLAPSED_KEY, JSON.stringify([...this._state.members.collapsed]));
+    } catch (_err) { /* storage unavailable: just not remembered */ }
+  }
+
+  // Collapsing a group deselects its rows, so a bulk change only ever
+  // touches rows in view.
+  _setCollapsed(key, collapsed) {
+    const st = this._state.members;
+    if (collapsed) {
+      st.collapsed.add(key);
+      for (const sel of [...st.selected]) if (sel.split("|")[0] === key) st.selected.delete(sel);
+    } else {
+      st.collapsed.delete(key);
+    }
+    this._saveCollapsed();
+  }
+
+  // -- rendering --------------------------------------------------------
+
+  _render() {
+    for (const div of this.shadowRoot.querySelectorAll("[data-mode]")) {
+      div.hidden = div.dataset.mode !== this._mode;
+    }
+    if (this._mode === "members") this._renderMembers();
+    else this._renderGroups();
+    this._syncControls();
+  }
+
+  _visibleRows() {
+    const st = this._state.members;
+    const wanted = words(st.filter);
+    const rows = this._rows();
+    const grouped = new Set(rows.filter((r) => r.group).map((r) => r.endpoint));
+    return rows.filter((r) => {
+      if (st.kind === "none" && grouped.has(r.endpoint)) return false;
+      if (st.kind === "grouped" && !r.group) return false;
+      if (!wanted.length) return true;
+      const text = `${r.name} ${r.manufacturer} ${r.model} ${r.area} ${r.ieee} ${this._groupName(r.group)}`.toLowerCase();
+      return wanted.every((w) => text.includes(w));
+    });
+  }
+
+  _status(empty) {
+    const status = this._el("status");
+    status.hidden = this._loaded && !this._error && !empty;
+    status.textContent = this._error || (!this._loaded ? "Loading…" : empty);
+  }
+
+  _renderMembers() {
+    const st = this._state.members;
+    this._el("member-filter").value = st.filter;
+    this._el("member-kind").value = st.kind;
+    const rows = this._error ? [] : this._visibleRows();
+    const shown = rows.filter((r) => !st.collapsed.has(r.group));
+    const columns = ["name", "manufacturer", "model", "area", "actions"];
+
+    const head = this._el("head");
+    head.textContent = "";
+    const selectedShown = shown.filter((r) => st.selected.has(r.key)).length;
+    const allCb = el("input", { type: "checkbox", dataset: { selectAll: "1" }, title: "Select every device shown" });
+    allCb.checked = shown.length > 0 && selectedShown === shown.length;
+    allCb.indeterminate = selectedShown > 0 && selectedShown < shown.length;
+    allCb.disabled = !shown.length;
+    head.append(el("th", { class: "check" }, allCb));
+    for (const key of columns) {
+      const col = MEMBER_COLUMNS[key];
+      if (!col.cmp) {
+        head.append(el("th", {}, col.label));
+        continue;
+      }
+      const th = el("th", { class: "sortable", dataset: { sort: key } }, col.label);
+      th.append(el("span", { class: "arrow" }, st.sort.key === key ? (st.sort.dir > 0 ? "▲" : "▼") : ""));
+      head.append(th);
+    }
+
+    // "Not in a group" first, then the groups A-Z, empty ones included.
+    const groups = new Map();
+    if (!st.kind || st.kind === "none") groups.set(NONE, []);
+    if (st.kind !== "none" && !words(st.filter).length) {
+      for (const g of this._groups) groups.set(String(g.group_id), []);
+    }
+    for (const r of rows) {
+      if (!groups.has(r.group)) groups.set(r.group, []);
+      groups.get(r.group).push(r);
+    }
+    if (!groups.get(NONE)?.length) groups.delete(NONE);
+    const order = [...groups.keys()].sort((a, b) => {
+      if (!a !== !b) return a ? 1 : -1;
+      return cmp(this._groupName(a), this._groupName(b));
+    });
+    const body = this._el("body");
+    body.textContent = "";
+    const frag = document.createDocumentFragment();
+    const sortCol = MEMBER_COLUMNS[st.sort.key];
+    for (const key of order) {
+      const members = groups.get(key).sort(byColumn(sortCol, st.sort.dir));
+      const collapsed = st.collapsed.has(key);
+      frag.append(this._groupRow(key, members, collapsed, columns.length));
+      if (!collapsed) for (const r of members) frag.append(this._memberRow(r, columns));
+    }
+    body.append(frag);
+    this._status(groups.size ? "" : (this._groupable.length || this._groups.length
+      ? "Nothing matches." : "No groupable Zigbee devices or groups yet."));
+
+    const toggle = this.shadowRoot.querySelector('[data-action="toggle-groups"]');
+    toggle.disabled = !groups.size;
+    toggle.textContent = groups.size && [...groups.keys()].every((k) => st.collapsed.has(k)) ? "Expand all" : "Collapse all";
+
+    const endpoints = new Set(this._rows().map((r) => r.endpoint));
+    const ungrouped = this._rows().filter((r) => !r.group).length;
+    this._el("footer").textContent = this._loaded && !this._error
+      ? `${plural(this._groups.length, "Zigbee group", "Zigbee groups")}; ${plural(endpoints.size, "groupable device", "groupable devices")}, ${ungrouped} in no group. A device can be in more than one group.`
+      : "";
+  }
+
+  _groupRow(key, members, collapsed, colSpan) {
+    const st = this._state.members;
+    const tr = el("tr", {
+      class: "group", dataset: { groupToggle: key },
+      title: collapsed ? "Show these devices" : "Hide these devices",
+    });
+    const selected = members.filter((r) => st.selected.has(r.key)).length;
+    const cb = el("input", {
+      type: "checkbox", dataset: { groupSelect: key },
+      title: collapsed ? "Expand to select these devices" : "Select all of these devices",
+    });
+    cb.checked = selected > 0 && selected === members.length;
+    cb.indeterminate = selected > 0 && selected < members.length;
+    cb.disabled = collapsed || !members.length;
+    tr.append(el("td", { class: "check" }, cb));
+    const td = el("td", { colSpan });
+    td.append(el("span", { class: "caret" }, collapsed ? "▸" : "▾"));
+    td.append(key ? this._groupName(key) : "Not in a group");
+    td.append(el("span", { class: "group-count" }, ` (${members.length})`));
+    if (key) {
+      td.append(el("span", { class: "chip floor group-id" }, hexGroupId(key)));
+      td.append(el("a", {
+        class: "group-link", href: `/config/zha/group/${encodeURIComponent(key)}`,
+        dataset: { nav: "1" }, title: "Open this group in ZHA",
+      }, "Group ↗"));
+    }
+    tr.append(td);
+    return tr;
+  }
+
+  _memberRow(r, columns) {
+    const st = this._state.members;
+    const tr = el("tr", { class: "row", dataset: { id: r.key } });
+    if (st.selected.has(r.key)) tr.classList.add("selected");
+    const cb = el("input", { type: "checkbox", dataset: { row: r.key } });
+    cb.checked = st.selected.has(r.key);
+    tr.append(el("td", { class: "check" }, cb));
+    for (const key of columns) {
+      const td = el("td", { class: MEMBER_COLUMNS[key].cls || "" });
+      switch (key) {
+        case "name":
+          if (r.device_id) {
+            td.append(el("a", {
+              href: `/config/devices/device/${encodeURIComponent(r.device_id)}`,
+              dataset: { nav: "1" }, title: "Open this device in Home Assistant",
+            }, r.name));
+          } else {
+            td.append(r.name);
+          }
+          td.append(el("div", { class: "sub" }, r.ieee));
+          break;
+        case "manufacturer":
+          if (r.manufacturer) td.append(el("span", { class: "label" }, "Manufacturer: "), r.manufacturer);
+          break;
+        case "model":
+          if (r.model) td.append(el("span", { class: "label" }, "Model: "), r.model);
+          break;
+        case "area":
+          if (r.area) td.append(el("span", { class: "label" }, "Area: "), r.area);
+          break;
+        case "actions": {
+          // Add to another group straight from the row; remove from the
+          // group it's listed under.
+          const select = el("select", { dataset: { addRow: r.key }, title: "Add this device to a group" });
+          this._groupOptions(select, r.endpoint, "Add to group…");
+          select.disabled = this._busy || select.options.length < 2;
+          const wrap = el("div", { class: "row-actions" }, select);
+          td.append(wrap);
+          if (r.group) {
+            wrap.append(el("button", {
+              class: "action danger secondary small", dataset: { removeRow: r.key },
+              title: `Take it out of ${this._groupName(r.group)}`,
+            }, "Remove"));
+          }
+          break;
+        }
+        default:
+          break;
+      }
+      tr.append(td);
+    }
+    return tr;
+  }
+
+  // The groups an endpoint (or, with none given, anything) can be added to.
+  _groupOptions(select, endpoint, placeholder) {
+    const keep = select.value;
+    select.textContent = "";
+    select.append(el("option", { value: "__pick__", disabled: true }, placeholder));
+    const groups = [...this._groups].sort((a, b) => cmp(a.name, b.name));
+    for (const g of groups) {
+      const id = String(g.group_id);
+      if (endpoint && this._membersOf(id).has(endpoint)) continue;
+      select.append(el("option", { value: id }, g.name || hexGroupId(id)));
+    }
+    select.value = keep && keep !== "__pick__" ? keep : "__pick__";
+    if (select.value !== keep) select.value = "__pick__";
+  }
+
+  _visibleGroups() {
+    const wanted = words(this._state.groups.filter);
+    return this._groups.filter((g) => {
+      if (!wanted.length) return true;
+      const text = `${g.name} ${hexGroupId(g.group_id)} ${g.group_id}`.toLowerCase();
+      return wanted.every((w) => text.includes(w));
+    });
+  }
+
+  _renderGroups() {
+    const st = this._state.groups;
+    this._el("group-filter").value = st.filter;
+    const rows = this._error ? [] : this._visibleGroups().sort(byColumn(ZGROUP_COLUMNS[st.sort.key], st.sort.dir));
+    const columns = ["name", "id", "members", "actions"];
+    const head = this._el("head");
+    head.textContent = "";
+    const selectedShown = rows.filter((g) => st.selected.has(String(g.group_id))).length;
+    const allCb = el("input", { type: "checkbox", dataset: { selectAllGroups: "1" }, title: "Select every group shown" });
+    allCb.checked = rows.length > 0 && selectedShown === rows.length;
+    allCb.indeterminate = selectedShown > 0 && selectedShown < rows.length;
+    allCb.disabled = !rows.length;
+    head.append(el("th", { class: "check" }, allCb));
+    for (const key of columns) {
+      const col = ZGROUP_COLUMNS[key];
+      if (!col.cmp) {
+        head.append(el("th", {}, col.label));
+        continue;
+      }
+      const th = el("th", { class: `sortable ${col.num ? "num" : ""}`, dataset: { sort: key } }, col.label);
+      th.append(el("span", { class: "arrow" }, st.sort.key === key ? (st.sort.dir > 0 ? "▲" : "▼") : ""));
+      head.append(th);
+    }
+    const body = this._el("body");
+    body.textContent = "";
+    const frag = document.createDocumentFragment();
+    for (const g of rows) {
+      const id = String(g.group_id);
+      const tr = el("tr", { class: "row", dataset: { groupId: id } });
+      if (st.selected.has(id)) tr.classList.add("selected");
+      const cb = el("input", { type: "checkbox", dataset: { groupRow: id } });
+      cb.checked = st.selected.has(id);
+      tr.append(el("td", { class: "check" }, cb));
+      tr.append(el("td", {}, el("a", {
+        href: `/config/zha/group/${encodeURIComponent(id)}`, dataset: { nav: "1" }, title: "Open this group in ZHA",
+      }, g.name || hexGroupId(id))));
+      tr.append(el("td", { class: "minor" }, el("span", { class: "label" }, "Group ID: "), hexGroupId(id)));
+      tr.append(el("td", { class: "num minor" }, el("button", {
+        class: "linkish", dataset: { showGroup: id }, title: "Show this group's devices",
+      }, plural((g.members || []).length, "device", "devices"))));
+      tr.append(el("td", { class: "actions" }));
+      frag.append(tr);
+    }
+    body.append(frag);
+    this._status(rows.length ? "" : (this._groups.length ? "No groups match." : "No Zigbee groups yet. Create one above."));
+    this._el("footer").textContent = this._loaded && !this._error
+      ? `${plural(this._groups.length, "Zigbee group", "Zigbee groups")}. ZHA can't rename a group; delete it and create a new one instead.`
+      : "";
+  }
+
+  // The selected rows still in view (filtered in, not collapsed).
+  _selectedRows() {
+    const st = this._state.members;
+    if (!st.selected.size) return [];
+    return this._visibleRows().filter((r) => st.selected.has(r.key) && !st.collapsed.has(r.group));
+  }
+
+  _syncControls() {
+    if (this._mode === "members") {
+      const rows = this._selectedRows();
+      const devices = new Set(rows.map((r) => r.endpoint));
+      this._el("selection").textContent = devices.size
+        ? `${plural(devices.size, "device", "devices")} selected`
+        : "No devices selected";
+      const bulk = this._el("bulk-group");
+      this._groupOptions(bulk, null, "Add to group…");
+      const add = this.shadowRoot.querySelector('[data-action="add"]');
+      add.disabled = this._busy || !devices.size || bulk.value === "__pick__";
+      const remove = this.shadowRoot.querySelector('[data-action="remove"]');
+      remove.disabled = this._busy || !rows.some((r) => r.group);
+      for (const select of this.shadowRoot.querySelectorAll("select[data-add-row]")) {
+        select.disabled = this._busy || select.options.length < 2;
+      }
+      for (const btn of this.shadowRoot.querySelectorAll("[data-remove-row]")) btn.disabled = this._busy;
+      for (const btn of this.shadowRoot.querySelectorAll('[data-action="refresh"]')) btn.disabled = this._busy;
+    } else {
+      const st = this._state.groups;
+      this.shadowRoot.querySelector('[data-action="create"]').disabled =
+        this._busy || !!this._error || !this._el("new-name").value.trim();
+      const del = this.shadowRoot.querySelector('[data-action="ask-delete"]');
+      del.disabled = this._busy || !st.selected.size;
+      del.textContent = st.selected.size ? `Delete ${plural(st.selected.size, "group", "groups")}` : "Delete selected";
+      if (!st.selected.size) st.confirming = false;
+      this._el("confirm").classList.toggle("open", st.confirming);
+      if (st.confirming) {
+        const names = [...st.selected].map((id) => this._groupName(id)).sort(cmp);
+        const shown = names.length > 5 ? `${names.slice(0, 5).join(", ")} and ${names.length - 5} more` : names.join(", ");
+        this._el("confirm-text").textContent =
+          `Delete ${plural(names.length, "Zigbee group", "Zigbee groups")} (${shown})? `
+          + (names.length === 1
+            ? "Its devices are taken out of it and its group entity is removed."
+            : "Their devices are taken out of them and their group entities are removed.")
+          + " This can't be undone.";
+      }
+      this.shadowRoot.querySelector('[data-action="delete"]').disabled = this._busy;
+    }
+  }
+
+  // -- changes ----------------------------------------------------------
+
+  _member(endpoint) {
+    const [ieee, ep] = endpoint.split("/");
+    return { ieee, endpoint_id: Number(ep) };
+  }
+
+  async _add(endpoints, groupId) {
+    const already = this._membersOf(groupId);
+    const adding = [...new Set(endpoints)].filter((e) => !already.has(e));
+    const name = this._groupName(groupId);
+    if (!adding.length) {
+      this._toast(`Already in ${name}`);
+      return true;
+    }
+    const res = await this._call(
+      { type: ZHA_WS.MEMBERS_ADD, group_id: Number(groupId), members: adding.map((e) => this._member(e)) },
+      `Added ${plural(adding.length, "device", "devices")} to ${name}`,
+    );
+    await this._fetch();
+    return !!res;
+  }
+
+  async _remove(rows) {
+    const byGroup = new Map();
+    for (const r of rows) {
+      if (!r.group) continue;
+      if (!byGroup.has(r.group)) byGroup.set(r.group, []);
+      byGroup.get(r.group).push(r.endpoint);
+    }
+    let ok = true;
+    let removed = 0;
+    for (const [groupId, endpoints] of byGroup) {
+      const res = await this._call({
+        type: ZHA_WS.MEMBERS_REMOVE, group_id: Number(groupId), members: endpoints.map((e) => this._member(e)),
+      });
+      if (res) removed += endpoints.length;
+      else ok = false;
+    }
+    if (removed) {
+      this._toast(byGroup.size === 1
+        ? `Removed ${plural(removed, "device", "devices")} from ${this._groupName([...byGroup.keys()][0])}`
+        : `Removed ${plural(removed, "device", "devices")} from their groups`);
+    }
+    await this._fetch();
+    return ok;
+  }
+
+  async _createGroup() {
+    const input = this._el("new-name");
+    const name = input.value.trim();
+    if (!name || this._busy) return;
+    if (this._groups.some((g) => (g.name || "").toLowerCase() === name.toLowerCase())) {
+      this._toast(`There's already a group called ${name}`);
+      return;
+    }
+    const res = await this._call({ type: ZHA_WS.GROUP_ADD, group_name: name }, `Created ${name}`);
+    if (res) {
+      input.value = "";
+      this._syncControls();
+      input.focus();
+    }
+    await this._fetch();
+  }
+
+  _showGroup(groupId) {
+    const st = this._state.members;
+    st.filter = "";
+    st.kind = "";
+    st.collapsed.delete(groupId);
+    this._saveCollapsed();
+    this.dispatchEvent(new CustomEvent("area-manager-view", {
+      detail: { view: "zigbee" }, bubbles: true, composed: true,
+    }));
+    requestAnimationFrame(() => {
+      const row = [...this.shadowRoot.querySelectorAll("tr.group")].find((tr) => tr.dataset.groupToggle === groupId);
+      if (row) row.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  }
+
+  // -- events -----------------------------------------------------------
+
+  async _onClick(ev) {
+    const path = ev.composedPath();
+    const find = (key) => path.find((n) => n.dataset && n.dataset[key] !== undefined);
+    const link = find("nav");
+    if (link) {
+      if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button) return;
+      ev.preventDefault();
+      history.pushState(null, "", link.getAttribute("href"));
+      window.dispatchEvent(new CustomEvent("location-changed"));
+      return;
+    }
+    if (path[0]?.type === "checkbox" || path[0]?.tagName === "SELECT") return;
+    const action = find("action")?.dataset.action;
+    if (action === "refresh") {
+      await this._fetch();
+      return;
+    }
+    if (this._mode === "members") await this._onMembersClick(find, action);
+    else await this._onGroupsClick(find, action);
+  }
+
+  async _onMembersClick(find, action) {
+    const st = this._state.members;
+    const group = find("groupToggle");
+    if (group) {
+      const key = group.dataset.groupToggle;
+      this._setCollapsed(key, !st.collapsed.has(key));
+      this._render();
+      return;
+    }
+    const sortTh = find("sort");
+    if (sortTh) {
+      const key = sortTh.dataset.sort;
+      if (st.sort.key === key) st.sort.dir = -st.sort.dir;
+      else st.sort = { key, dir: MEMBER_COLUMNS[key].firstDir || 1 };
+      this._render();
+      return;
+    }
+    const removeBtn = find("removeRow");
+    if (removeBtn) {
+      const row = this._rows().find((r) => r.key === removeBtn.dataset.removeRow);
+      if (row) await this._remove([row]);
+      return;
+    }
+    switch (action) {
+      case "toggle-groups": {
+        const keys = new Set([...this.shadowRoot.querySelectorAll("tr.group")].map((tr) => tr.dataset.groupToggle));
+        const allCollapsed = [...keys].every((k) => st.collapsed.has(k));
+        for (const k of keys) this._setCollapsed(k, !allCollapsed);
+        this._render();
+        break;
+      }
+      case "add": {
+        const groupId = this._el("bulk-group").value;
+        if (groupId === "__pick__") return;
+        if (await this._add(this._selectedRows().map((r) => r.endpoint), groupId)) {
+          st.selected.clear();
+          this._render();
+        }
+        break;
+      }
+      case "remove":
+        if (await this._remove(this._selectedRows())) {
+          st.selected.clear();
+          this._render();
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  async _onGroupsClick(find, action) {
+    const st = this._state.groups;
+    const sortTh = find("sort");
+    if (sortTh) {
+      const key = sortTh.dataset.sort;
+      if (st.sort.key === key) st.sort.dir = -st.sort.dir;
+      else st.sort = { key, dir: ZGROUP_COLUMNS[key].firstDir || 1 };
+      this._render();
+      return;
+    }
+    const show = find("showGroup");
+    if (show) {
+      this._showGroup(show.dataset.showGroup);
+      return;
+    }
+    switch (action) {
+      case "create":
+        await this._createGroup();
+        break;
+      case "ask-delete":
+        st.confirming = true;
+        this._syncControls();
+        break;
+      case "cancel-delete":
+        st.confirming = false;
+        this._syncControls();
+        break;
+      case "delete": {
+        const ids = [...st.selected].map(Number);
+        const res = await this._call(
+          { type: ZHA_WS.GROUP_REMOVE, group_ids: ids },
+          `Deleted ${plural(ids.length, "Zigbee group", "Zigbee groups")}`,
+        );
+        if (res) {
+          st.selected.clear();
+          st.confirming = false;
+        }
+        await this._fetch();
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  async _onChange(ev) {
+    const target = ev.composedPath()[0];
+    const ds = target.dataset || {};
+    if (target === this._el("member-kind")) {
+      this._state.members.kind = target.value;
+      this._render();
+      return;
+    }
+    if (target === this._el("bulk-group")) {
+      this._syncControls();
+      return;
+    }
+    if (ds.addRow !== undefined) {
+      // One device, straight from its row.
+      const row = this._rows().find((r) => r.key === ds.addRow);
+      const groupId = target.value;
+      target.value = "__pick__";
+      if (row && groupId !== "__pick__") await this._add([row.endpoint], groupId);
+      return;
+    }
+    if (this._mode === "members") {
+      const st = this._state.members;
+      const set = (key) => (target.checked ? st.selected.add(key) : st.selected.delete(key));
+      if (ds.row !== undefined) set(ds.row);
+      else if (ds.groupSelect !== undefined) {
+        for (const r of this._visibleRows()) if (r.group === ds.groupSelect) set(r.key);
+      } else if (ds.selectAll !== undefined) {
+        for (const r of this._visibleRows()) if (!st.collapsed.has(r.group)) set(r.key);
+      } else return;
+      this._render();
+      return;
+    }
+    const st = this._state.groups;
+    const set = (key) => (target.checked ? st.selected.add(key) : st.selected.delete(key));
+    if (ds.groupRow !== undefined) set(ds.groupRow);
+    else if (ds.selectAllGroups !== undefined) {
+      for (const g of this._visibleGroups()) set(String(g.group_id));
+    } else return;
+    this._render();
+  }
+}
+
+if (!customElements.get("area-manager-zigbee")) {
+  customElements.define("area-manager-zigbee", AreaManagerZigbee);
 }
 
 if (!customElements.get("area-manager-panel")) {

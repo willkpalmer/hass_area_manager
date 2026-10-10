@@ -48,6 +48,7 @@ async def test_snapshot_lists_categories_and_items(hass: HomeAssistant, hass_ws_
     assert items[auto]["name"] == "Night lights"
     assert items["script.wake"]["scope"] == "script" and items["script.wake"]["editable"]
     assert items["scene.yaml_only"]["editable"] is False
+    assert snapshot["zha"] is False
 
     # A new automation shows up, but its runs don't send updates.
     _entity(hass, "automation", "morning", "Morning")
