@@ -80,6 +80,7 @@ const STYLE = `
   flex: none;
 }
 .header h1 { font-size: 20px; font-weight: 400; margin: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.header .version { font-size: 14px; opacity: 0.75; margin-left: 8px; }
 .menu-btn { display: none; background: none; border: 0; color: inherit; font-size: 22px; cursor: pointer; padding: 4px 8px; }
 :host([narrow]) .menu-btn { display: inline-block; }
 .content {
@@ -252,7 +253,7 @@ a:hover { text-decoration: underline; }
 const TEMPLATE = `
 <div class="header">
   <button class="menu-btn" title="Menu" data-action="menu">&#9776;</button>
-  <h1>Area Manager</h1>
+  <h1>Area Manager<span class="version" data-el="version"></span></h1>
 </div>
 <div class="content">
   <div class="views">
@@ -479,7 +480,12 @@ class AreaManagerPanel extends HTMLElement {
 
   get narrow() { return this._narrow; }
 
-  set panel(value) { this._panel = value; }
+  set panel(value) {
+    this._panel = value;
+    // The installed version, from manifest.json (see panel.py).
+    const version = value?.config?.version;
+    this._el("version").textContent = version ? `v${version}` : "";
+  }
 
   get panel() { return this._panel; }
 

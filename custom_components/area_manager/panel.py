@@ -52,6 +52,8 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         module_url=f"{PANEL_STATIC_URL}/{PANEL_MODULE_FILE}?v={version}",
         embed_iframe=False,
         require_admin=True,
+        # Shown in the panel's title bar.
+        config={"version": version},
     )
 
 
